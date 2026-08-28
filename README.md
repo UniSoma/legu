@@ -86,6 +86,13 @@ Files are read as bytes and decoded latin-1, so a change to a non-UTF-8 byte is
 still a change. State is measured against the **working tree**, not against
 HEAD, so an uncommitted edit shows up as stale immediately.
 
+## Emacs
+
+`emacs/` holds `legu.el`, an Emacs 30 front end: a fringe gutter showing which
+lines of the file you are looking at have been read, and one keystroke meaning
+"everything from where I left off down to here, I have now read". See
+[emacs/README.md](emacs/README.md).
+
 ## Storage
 
 `.review/` at the repo root, one EDN file per source file, mirroring the source
