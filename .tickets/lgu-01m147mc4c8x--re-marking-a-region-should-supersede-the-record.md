@@ -6,16 +6,18 @@ type: bug
 priority: 2
 mode: afk
 created: '2026-08-28T13:06:02.508896759Z'
-updated: '2026-08-28T13:06:02.508896759Z'
+updated: '2026-08-28T19:58:06.718545868Z'
 acceptance:
 - title: Marking a region that fully contains an existing record leaves exactly one record behind
-  done: false
-- title: Ticket references on a retired record are carried onto the new one
   done: false
 - title: The chosen overlap rule is stated in the README, with the reasoning for it
   done: false
 - title: '`legu stale` no longer reports a region that has been re-read at a drifted range'
   done: false
+- title: 'Ticket references anchored inside the re-marked region are untouched: they are independent anchors, not fields of the retired record'
+  done: false
+links:
+- lgu-01m14z6pw14r
 ---
 
 ## Description
@@ -38,3 +40,9 @@ retires the old record or only containment, and what happens to the part of an
 old region that the new mark does not cover. The conservative reading — a
 partly re-read region is not a read region — argues for retiring only records
 the new mark fully contains, and leaving the rest to be re-read.
+
+## Notes
+
+**2026-08-28T19:58:06.718545868Z**
+
+The description's 'carrying their ticket references onto the new record' is superseded by ADR-0012: the per-record notes field is gone (see lgu-01m14z6pw14r). Ticket references are independent anchors and need no carrying.
