@@ -1,0 +1,28 @@
+# Clojure / Babashka
+.cpcache/
+.clj-kondo/.cache/
+.lsp/.cache/
+.nrepl-port
+.bb-port
+.rebel_readline_history
+.portal/
+target/
+classes/
+*.class
+pom.xml.asc
+/checkouts/
+
+# Editors / OS
+.idea/
+*.iml
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Local scratch
+.scratch/
+.env
+.env.*
+/wip/
+/.revu/
