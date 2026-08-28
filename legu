@@ -1,0 +1,796 @@
+#!/usr/bin/env bb
+;; legu — human review coverage for a codebase.
+;; Depends on babashka and git. Nothing else.
+
+(ns legu.main
+  (:require [babashka.fs :as fs]
+            [babashka.process :as p]
+            [cheshire.core :as json]
+            [clojure.edn :as edn]
+            [clojure.pprint :as pp]
+            [clojure.set :as set]
+            [clojure.string :as str])
+  (:import [java.security MessageDigest]
+           [java.time Instant]))
+
+(def ^:dynamic *root* ".")
+(def ^:dynamic *git?* true)
+
+(def NUL #"\u0000")
+
+;; Files are decoded as latin-1 so every byte round-trips: a change in a
+;; non-UTF-8 byte must not be invisible to the content hash.
+(def ENC "ISO-8859-1")
+
+(defn die [msg]
+  (binding [*out* *err*] (println (str "legu: " msg)))
+  (System/exit 1))
+
+;; ---------------------------------------------------------------- git
+
+(defn git
+  "Run git in the repo root. Returns {:exit :out :err}; never throws."
+  [& args]
+  (apply p/sh {:dir *root* :out :string :err :string :continue true} "git" args))
+
+(defn git-ok
+  "stdout of a successful git invocation, or nil."
+  [& args]
+  (let [{:keys [exit out]} (apply git args)]
+    (when (zero? exit) out)))
+
+(defn git-toplevel []
+  (let [{:keys [exit out]} (p/sh {:out :string :err :string :continue true}
+                                 "git" "rev-parse" "--show-toplevel")]
+    (when (zero? exit) (not-empty (str/trim out)))))
+
+(defn head-sha []
+  (some-> (git-ok "rev-parse" "HEAD") str/trim))
+
+(defn split-z [s]
+  (when s (vec (remove str/blank? (str/split s NUL)))))
+
+(defn tracked-files []
+  (or (split-z (git-ok "ls-files" "-z")) []))
+
+(defn ignored-files
+  "Tracked files matching .reviewignore. Gitignore syntax, matched by git itself."
+  []
+  (let [f (fs/file *root* ".reviewignore")]
+    (cond
+      (not (fs/exists? f)) #{}
+
+      (not *git?*)
+      (do (binding [*out* *err*]
+            (println "legu: .reviewignore needs git to match; every file counts as eligible"))
+          #{})
+
+      :else
+      (let [{:keys [exit out err]} (git "ls-files" "-c" "-i" "-z"
+                                        (str "--exclude-from=" (str f)))]
+        (when-not (zero? exit)
+          (die (str "cannot apply .reviewignore: " (str/trim (or err "")))))
+        (set (split-z out))))))
+
+(defn- name-status
+  "Parsed `git diff --name-status -z` between commit and the working tree. Low
+   similarity thresholds, so a small file renamed *and* edited is still matched."
+  [commit]
+  (loop [toks (or (split-z (git-ok "diff" "-M20%" "--name-status" "-z" commit)) [])
+         renames {} added []]
+    (if-let [t (first toks)]
+      (cond
+        (re-matches #"^R\d*$" t)
+        (recur (drop 3 toks) (assoc renames (second toks) (nth toks 2 nil)) added)
+
+        (re-matches #"^C\d*$" t)
+        (recur (drop 3 toks) renames (conj added (nth toks 2 nil)))
+
+        (re-matches #"^A\d*$" t)
+        (recur (drop 2 toks) renames (conj added (second toks)))
+
+        (re-matches #"^[A-Z]\d*$" t)
+        (recur (drop 2 toks) renames added)
+
+        :else (recur (rest toks) renames added))
+      {:renames renames :added added})))
+
+(def ^:private diff-cache (atom {}))
+
+(defn diff-summary [commit]
+  (or (get @diff-cache commit)
+      (let [c (name-status commit)]
+        (swap! diff-cache assoc commit c)
+        c)))
+
+;; ---------------------------------------------------------------- content
+
+(defn- hex [bs]
+  (apply str (map #(format "%02x" %) bs)))
+
+(defn sha256 [^String s]
+  (hex (.digest (MessageDigest/getInstance "SHA-256") (.getBytes s ENC))))
+
+(defn sha256-bytes [^bytes bs]
+  (hex (.digest (MessageDigest/getInstance "SHA-256") bs)))
+
+(defn binary-bytes? [^bytes bs]
+  (let [n (min (alength bs) 8000)]
+    (loop [i 0]
+      (cond (>= i n) false
+            (zero? (aget bs i)) true
+            :else (recur (inc i))))))
+
+(defn lines-of [^String s]
+  (if (= "" s)
+    []
+    (let [v (vec (str/split s #"\n" -1))
+          v (if (= "" (peek v)) (pop v) v)]
+      (mapv #(str/replace % #"\r$" "") v))))
+
+(defn norm-hash
+  "Hash of a line sequence, leading and trailing whitespace stripped per line."
+  [lines]
+  (sha256 (str/join "\n" (map str/trim lines))))
+
+(defn read-worktree
+  "{:kind :text|:binary|:missing|:unreadable, :text, :lines, :hash}"
+  [path]
+  (let [f (fs/file *root* path)]
+    (if-not (fs/regular-file? f)
+      {:kind :missing}
+      (try
+        (let [bs (fs/read-all-bytes f)
+              h (sha256-bytes bs)]
+          (if (binary-bytes? bs)
+            {:kind :binary :hash h}
+            (let [s (String. bs ENC)]
+              {:kind :text :text s :lines (lines-of s) :hash h})))
+        (catch java.io.IOException _ {:kind :unreadable})))))
+
+(defn read-at-commit [commit path]
+  (when *git?*
+    (let [{:keys [exit out]} (p/sh {:dir *root* :out :bytes :err :string :continue true}
+                                   "git" "show" (str commit ":" path))]
+      (when (zero? exit) (String. ^bytes out ENC)))))
+
+;; ---------------------------------------------------------------- store
+
+(defn store-file [path]
+  (fs/file *root* ".review" (str path ".edn")))
+
+(defn load-state [path]
+  (let [f (store-file path)]
+    (if (fs/exists? f)
+      (let [v (try (edn/read-string (slurp f))
+                   (catch Exception e
+                     (die (str "cannot read " f ": " (ex-message e)))))]
+        (when-not (map? v)
+          (die (str "cannot read " f ": not a review record")))
+        (doseq [r (concat (:regions v) (:notes v))]
+          (when-not (or (:opaque r)
+                        (and (int? (:start r)) (int? (:end r))
+                             (pos? (:start r)) (<= (:start r) (:end r))))
+            (die (str "cannot read " f ": bad line range in " (pr-str r)))))
+        v)
+      {:schema 1 :path path :regions [] :notes []})))
+
+(defn save-state!
+  "Writes the sidecar, or removes it when nothing is left to record."
+  [{:keys [path] :as state}]
+  (let [f (store-file path)
+        by-range (juxt #(or (:start %) 0) #(or (:end %) 0))
+        regions (vec (sort-by by-range (:regions state)))
+        notes (vec (sort-by by-range (:notes state)))]
+    (if (and (empty? regions) (empty? notes))
+      (when (fs/exists? f) (fs/delete f))
+      (do (fs/create-dirs (fs/parent f))
+          (spit f (with-out-str (pp/pprint {:schema 1 :path path
+                                            :regions regions :notes notes})))))
+    state))
+
+(defn stored-paths []
+  (let [dir (fs/file *root* ".review")]
+    (if (fs/exists? dir)
+      (->> (fs/glob dir "**.edn" {:hidden true})
+           (filter fs/regular-file?)
+           (map #(str (fs/relativize (fs/path dir) %)))
+           (map #(subs % 0 (- (count %) 4)))
+           sort vec)
+      [])))
+
+;; ---------------------------------------------------------------- projection
+
+(defn parse-hunks
+  "[{:old-start :old-count :new-start :new-count}] from a -U0 diff."
+  [diff]
+  (keep (fn [l]
+          (when-let [[_ a b c d] (re-find #"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@" l)]
+            {:old-start (parse-long a)
+             :old-count (if b (parse-long b) 1)
+             :new-start (parse-long c)
+             :new-count (if d (parse-long d) 1)}))
+        (str/split-lines (or diff ""))))
+
+(defn diff-hunks
+  "Hunks between the file as it was at review time and its content now.
+   --no-index, so a rename or an untracked state needs no special case."
+  [old-text new-text]
+  (let [dir (fs/create-temp-dir {:prefix "legu"})]
+    (try
+      (let [a (fs/file (fs/file dir) "a")
+            b (fs/file (fs/file dir) "b")]
+        (spit a old-text :encoding ENC)
+        (spit b new-text :encoding ENC)
+        (parse-hunks (:out (p/sh {:out :string :err :string :continue true}
+                                 "git" "diff" "--no-index" "-U0" "--" (str a) (str b)))))
+      (finally (fs/delete-tree dir)))))
+
+(defn project-range
+  "Shift [start end] across hunks. :dirty? when a hunk touched the region itself."
+  [hunks start end]
+  (reduce (fn [{:keys [offset] :as acc} {:keys [old-start old-count new-count]}]
+            (let [old-end (+ old-start old-count -1)]
+              (cond
+                ;; a pure insertion sits after old-start, between two old lines
+                (zero? old-count)
+                (cond
+                  (< old-start start) (assoc acc :offset (+ offset new-count))
+                  (>= old-start end) acc
+                  :else (assoc acc :dirty? true))
+
+                (< old-end start) (assoc acc :offset (+ offset (- new-count old-count)))
+                (> old-start end) acc
+                :else (assoc acc :dirty? true))))
+          {:offset 0 :dirty? false}
+          hunks))
+
+(defn occurrences
+  "1-based start lines of every window of `len` lines hashing to `want`. Stops
+   after `cap` hits — callers only need to know whether the match is unique."
+  [lines len want cap]
+  (if-not (and (pos? len) (<= len (count lines)) (<= (count lines) 200000))
+    []
+    (let [last-i (- (count lines) len)]
+      (loop [i 0 hits []]
+        (cond
+          (or (> i last-i) (>= (count hits) cap)) hits
+          (= want (norm-hash (subvec lines i (+ i len)))) (recur (inc i) (conj hits (inc i)))
+          :else (recur (inc i) hits))))))
+
+(defn try-anchor
+  "Locate a record's reviewed content inside file `p`, whose content is `cur`.
+   Returns a :reviewed or a :stale result."
+  [{:keys [start end commit content-hash file-hash path]} p cur]
+  (if (= (:hash cur) file-hash)
+    ;; byte-identical to review time: nothing to project
+    {:state :reviewed :path p :start start :end end :moved? (not= p path)}
+    (let [new-lines (:lines cur)
+          len (inc (- end start))
+          old-text (read-at-commit commit path)
+          hunks (when old-text (diff-hunks old-text (:text cur)))
+          {:keys [offset]} (if hunks (project-range hunks start end) {:offset 0})
+          ns* (+ start offset)
+          ne (+ end offset)
+          in-bounds? (and (>= ns* 1) (<= ne (count new-lines)))]
+      (if (and in-bounds? (= content-hash (norm-hash (subvec new-lines (dec ns*) ne))))
+        {:state :reviewed :path p :start ns* :end ne
+         :moved? (or (not (zero? offset)) (not= p path))}
+        ;; The region did not land where the diff said. Look for the block
+        ;; elsewhere in the file — but only trust an unambiguous match: a block
+        ;; that already had a twin at review time proves nothing about a move.
+        (let [here (occurrences new-lines len content-hash 2)
+              there (when old-text (occurrences (lines-of old-text) len content-hash 2))]
+          (if (and (= 1 (count here)) (or (nil? there) (<= (count there) 1)))
+            {:state :reviewed :path p :start (first here) :end (+ (first here) len -1)
+             :moved? true :reason "block moved"}
+            (let [total (count new-lines)
+                  s (max 1 (min (if in-bounds? ns* start) total))
+                  e (max s (min (if in-bounds? ne end) total))]
+              {:state :stale :path p
+               :start (when (pos? total) s) :end (when (pos? total) e)
+               :reason "content changed"})))))))
+
+(defn- candidate-paths
+  "Where a record's file may have gone since `commit`. :renamed is git's own
+   answer, and carries a mark with it even when the content changed; :added is
+   a guess, and may only claim a mark whose content is actually found there."
+  [commit path gone?]
+  (if-not *git?*
+    {:renamed [] :added []}
+    (let [{:keys [renames added]} (diff-summary commit)]
+      {:renamed (if-let [r (get renames path)] [r] [])
+       :added (if gone? (take 1000 added) [])})))
+
+(defn resolve-region
+  "Current state of a stored record against the working tree.
+   => {:state :reviewed|:stale|:missing :path :start :end :moved? :reason}"
+  [{:keys [path start end opaque file-hash commit] :as record}]
+  (let [at-old (read-worktree path)
+        gone? (not (#{:text :binary} (:kind at-old)))
+        {:keys [renamed added]} (candidate-paths commit path gone?)]
+    (if opaque
+      (let [hit (first (for [p (concat [path] renamed added)
+                             :let [c (read-worktree p)]
+                             :when (= file-hash (:hash c))]
+                         p))]
+        (cond
+          hit {:state :reviewed :path hit :moved? (not= hit path)}
+          (not gone?) {:state :stale :path path :reason "content changed"}
+          (seq renamed) {:state :stale :path (first renamed) :moved? true
+                         :reason "content changed"}
+          :else {:state :missing :path path :reason "file is gone"}))
+      (let [old-res (when (= :text (:kind at-old)) (try-anchor record path at-old))
+            look (fn [ps] (for [p ps
+                                :let [c (read-worktree p)]
+                                :when (= :text (:kind c))]
+                            (assoc (try-anchor record p c) :moved? true)))]
+        (if (= :reviewed (:state old-res))
+          old-res
+          ;; git's rename beats an unrelated file that took over the old path
+          (let [moved (look renamed)]
+            (or (first (filter #(= :reviewed (:state %)) moved))
+                (first (filter #(= :reviewed (:state %)) (look added)))
+                old-res
+                (first moved)
+              (case (:kind at-old)
+                :binary {:state :stale :path path :start start :end end
+                         :reason "file became binary"}
+                :unreadable {:state :missing :path path :start start :end end
+                             :reason "file is unreadable"}
+                {:state :missing :path path :start start :end end
+                 :reason "file is gone"}))))))))
+
+;; ---------------------------------------------------------------- model
+
+(defn records
+  "Every stored review record, with :path merged in."
+  []
+  (vec (for [path (stored-paths)
+             r (:regions (load-state path))]
+         (assoc r :path path))))
+
+(defn note-records []
+  (vec (for [path (stored-paths)
+             n (:notes (load-state path))]
+         (assoc n :path path))))
+
+(defn- walk-files
+  "Every file in the working tree, for when there is no git to ask."
+  []
+  (->> (fs/glob (fs/path *root*) "**" {:hidden true})
+       (filter fs/regular-file?)
+       (map #(str (fs/relativize (fs/path *root*) %)))
+       (remove #(or (re-find #"(^|/)\.git/" %) (str/starts-with? % ".review/")))
+       sort vec))
+
+(defn eligible-files
+  "Files whose lines count toward coverage, with their line counts."
+  []
+  (let [ignored (ignored-files)
+        all (if *git?* (tracked-files) (walk-files))]
+    (vec (for [p all
+               :when (and (not (ignored p))
+                          (not (str/starts-with? p ".review/"))
+                          (not= p ".reviewignore"))]
+           (let [c (read-worktree p)]
+             {:path p
+              :binary (= :binary (:kind c))
+              :lines (case (:kind c)
+                       :text (count (:lines c))
+                       :binary 1
+                       0)})))))
+
+(defn resolved-by-path
+  "path -> {:reviewed #{lines} :stale #{lines}} at current locations."
+  []
+  (reduce (fn [acc r]
+            (let [res (resolve-region r)]
+              (if (= :missing (:state res))
+                acc
+                (let [ls (if (:start res)
+                           (set (range (:start res) (inc (:end res))))
+                           #{1})]
+                  (update-in acc [(:path res) (:state res)] (fnil into #{}) ls)))))
+          {}
+          (records)))
+
+(defn file-coverage [by-path {:keys [path lines]}]
+  (let [all (set (range 1 (inc lines)))
+        rev (set/intersection (get-in by-path [path :reviewed] #{}) all)
+        stl (set/intersection (set/difference (get-in by-path [path :stale] #{}) rev) all)]
+    {:path path :total lines
+     :reviewed (count rev) :stale (count stl)
+     :unreviewed (- lines (count rev) (count stl))
+     :reviewed-lines rev :stale-lines stl}))
+
+;; ---------------------------------------------------------------- helpers
+
+(defn rel-path
+  "Repo-root-relative form of a user-supplied path. Refuses to leave the repo."
+  [p]
+  (when (str/includes? p "\n")
+    (die "path contains a newline"))
+  (let [abs (str (fs/normalize (fs/absolutize (fs/path p))))
+        root (str (fs/normalize (fs/absolutize (fs/path *root*))))]
+    (cond
+      (= abs root) "."
+      (str/starts-with? abs (str root "/")) (subs abs (inc (count root)))
+      :else (die (str "path is outside the repository: " p)))))
+
+(defn- line-number [s]
+  (or (parse-long s) (die (str "line number out of range: " s))))
+
+(defn parse-target
+  "src/a.clj:10-40 -> {:path :start :end}. The range is optional, and a file
+   whose own name ends in a range-shaped suffix still wins."
+  [s]
+  (let [exists? (fn [x] (fs/regular-file? (fs/file *root* (rel-path x))))]
+    (or (when-let [[_ path a b] (re-matches #"^(.+):(\d+)-(\d+)$" s)]
+          (when-not (exists? s) {:path path :start (line-number a) :end (line-number b)}))
+        (when-let [[_ path a] (re-matches #"^(.+):(\d+)$" s)]
+          (when-not (exists? s) {:path path :start (line-number a) :end (line-number a)}))
+        {:path s})))
+
+(defn now [] (str (Instant/now)))
+
+(defn reviewer [opts]
+  (or (:reviewer opts)
+      (some-> (git-ok "config" "user.name") str/trim not-empty)
+      (System/getenv "USER")
+      "unknown"))
+
+(defn ranges
+  "Collapse a set of line numbers into [[start end] ...]."
+  [line-set]
+  (->> (sort line-set)
+       (reduce (fn [acc n]
+                 (if (and (seq acc) (= n (inc (second (peek acc)))))
+                   (conj (pop acc) [(first (peek acc)) n])
+                   (conj acc [n n])))
+               [])))
+
+(defn fmt-ranges [line-set]
+  (if (empty? line-set)
+    "-"
+    (str/join "," (map (fn [[a b]] (if (= a b) (str a) (str a "-" b)))
+                       (ranges line-set)))))
+
+(defn fmt-region [{:keys [start end]}]
+  (if start (str ":" start "-" end) ""))
+
+(defn emit [opts data render]
+  (if (:json opts)
+    (println (json/generate-string data {:pretty true}))
+    (render data)))
+
+;; ---------------------------------------------------------------- commands
+
+(defn region-of
+  "Resolve a user target against the working tree. A binary or empty file is one
+   opaque region with no line range."
+  [t]
+  (let [target (parse-target t)
+        path (rel-path (:path target))
+        cur (read-worktree path)]
+    (when (#{:missing :unreadable} (:kind cur))
+      (die (str (if (= :unreadable (:kind cur)) "cannot read file: " "no such file: ") path)))
+    (let [total (count (:lines cur))
+          opaque? (or (= :binary (:kind cur)) (zero? total))]
+      (when (and opaque? (:start target))
+        (die (str path (if (= :binary (:kind cur))
+                         " is binary and has no line ranges"
+                         " is empty and has no line ranges"))))
+      (let [start (when-not opaque? (or (:start target) 1))
+            end (when-not opaque? (or (:end target) total))]
+        (when (and (not opaque?)
+                   (or (< start 1) (> end total) (> start end)))
+          (die (format "range %d-%d outside %s (1-%d)" start end path total)))
+        {:path path :start start :end end :opaque opaque? :cur cur}))))
+
+(defn- same-region?
+  "Does a stored record currently sit exactly where this region does?"
+  [region record]
+  (let [res (resolve-region record)]
+    (and (= (:path region) (:path res))
+         (= (:start region) (:start res))
+         (= (:end region) (:end res)))))
+
+(defn- superseded?
+  "Is this record made obsolete by a mark of `region`? Exactly the same place,
+   or a whole-file mark, or a record whose file no longer has the shape it was
+   recorded with."
+  [region record]
+  (or (same-region? region record)
+      (and (nil? (:start region))
+           (= (:path region) (:path (resolve-region record))))
+      (and (:opaque record)
+           (:start region)
+           (= (:path region) (:path (resolve-region record))))))
+
+(defn- purge!
+  "Drop every stored record that currently resolves onto `region`, wherever its
+   sidecar lives — a region re-reviewed after a rename must leave no ghost.
+   Returns the ticket references those records carried."
+  [region kind extra-pred]
+  (let [carried (atom [])]
+    (doseq [sidecar (stored-paths)
+            :let [state (load-state sidecar)
+                  keep? (fn [r]
+                          (if (and (extra-pred r) (superseded? region (assoc r :path sidecar)))
+                            (do (swap! carried into (:notes r)) false)
+                            true))
+                  pruned (update state kind #(vec (filter keep? %)))]
+            :when (not= state pruned)]
+      (save-state! (assoc pruned :path sidecar)))
+    (vec (distinct @carried))))
+
+(defn cmd-mark [{:keys [args opts]}]
+  (when-not (first args) (die "mark needs a path"))
+  (let [{:keys [path start end opaque cur]} (region-of (first args))
+        carried (purge! {:path path :start start :end end} :regions (constantly true))
+        state (load-state path)
+        record (cond-> {:start start :end end
+                        :commit (or (head-sha) "-")
+                        :file-hash (:hash cur)
+                        :content-hash (if opaque
+                                        (:hash cur)
+                                        (norm-hash (subvec (:lines cur) (dec start) end)))
+                        :reviewer (reviewer opts)
+                        :timestamp (now)}
+                 opaque (assoc :opaque true)
+                 (seq carried) (assoc :notes carried))]
+    (save-state! (update state :regions #(conj (vec %) record)))
+    (when-let [why (cond
+                     ((ignored-files) path) "is excluded by .reviewignore"
+                     (and *git?* (not ((set (tracked-files)) path))) "is not tracked by git")]
+      (binding [*out* *err*]
+        (println (str "legu: " path " " why " and will not count toward coverage"))))
+    (emit opts {:marked path :start start :end end :commit (:commit record)}
+          (fn [_] (println (format "marked %s%s reviewed at %s"
+                                   path
+                                   (if opaque " (whole file)" (str ":" start "-" end))
+                                   (subs (:commit record) 0
+                                         (min 8 (count (:commit record))))))))))
+
+(defn cmd-note [{:keys [args opts]}]
+  (let [[t ticket] args]
+    (when-not t (die "note needs a path"))
+    (when (str/blank? ticket) (die "note needs a ticket id"))
+    (let [{:keys [path start end opaque cur]} (region-of t)]
+      (purge! {:path path :start start :end end} :notes #(= ticket (:ticket %)))
+      (let [state (load-state path)
+            note (cond-> {:start start :end end
+                          :ticket ticket
+                          :commit (or (head-sha) "-")
+                          :file-hash (:hash cur)
+                          :content-hash (if opaque
+                                          (:hash cur)
+                                          (norm-hash (subvec (:lines cur) (dec start) end)))
+                          :timestamp (now)}
+                   opaque (assoc :opaque true))]
+        (save-state! (update state :notes #(conj (vec %) note)))
+        (emit opts {:noted path :start start :end end :ticket ticket}
+              (fn [_] (println (format "noted %s%s -> %s"
+                                       path (if opaque "" (str ":" start "-" end))
+                                       ticket))))))))
+
+(defn cmd-forget [{:keys [args opts]}]
+  (when-not (first args) (die "forget needs a path"))
+  (let [target (parse-target (first args))
+        path (rel-path (:path target))
+        {:keys [start end]} target
+        region {:path path :start start :end end}
+        ;; the file may be long gone: match where a record sits now, or where
+        ;; it was recorded
+        stored-match? (fn [sidecar r]
+                        (and (= sidecar path)
+                             (or (nil? start)
+                                 (and (= start (:start r)) (= end (:end r))))))
+        dropped (atom 0)]
+    (doseq [sidecar (stored-paths)
+            :let [state (load-state sidecar)
+                  keep? (fn [r]
+                          (if (or (stored-match? sidecar r)
+                                  (and start (same-region? region (assoc r :path sidecar))))
+                            (do (swap! dropped inc) false)
+                            true))
+                  pruned (-> state
+                             (update :regions #(vec (filter keep? %)))
+                             (update :notes #(vec (filter keep? %))))]
+            :when (not= state pruned)]
+      (save-state! (assoc pruned :path sidecar)))
+    (emit opts {:forgot @dropped :path path :start start :end end}
+          (fn [_] (println (format "forgot %d record%s at %s%s"
+                                   @dropped (if (= 1 @dropped) "" "s") path
+                                   (if start (str ":" start "-" end) "")))))))
+
+(defn under? [path prefix]
+  (or (nil? prefix)
+      (= prefix ".")
+      (= path prefix)
+      (str/starts-with? path (str prefix "/"))))
+
+(defn cmd-status [{:keys [args opts]}]
+  (let [prefix (some-> (first args) (str/replace #"/$" "") rel-path)
+        by-path (resolved-by-path)
+        files (->> (eligible-files)
+                   (filter #(under? (:path %) prefix))
+                   (map #(file-coverage by-path %))
+                   (sort-by :path))
+        notes (->> (note-records)
+                   (map (fn [n] (assoc (resolve-region n) :ticket (:ticket n))))
+                   (filter #(under? (:path %) prefix))
+                   (sort-by (juxt :path #(or (:start %) 0))))
+        data {:files (mapv #(-> (dissoc % :reviewed-lines :stale-lines)
+                                (assoc :ranges (fmt-ranges (:reviewed-lines %))))
+                           files)
+              :notes (mapv #(-> (select-keys % [:path :start :end :ticket])
+                                (assoc :state (name (:state %))))
+                           notes)}]
+    (emit opts data
+          (fn [_]
+            (if (empty? files)
+              (println "no eligible files")
+              (do
+                (println (format "%-52s %6s %6s %6s  %s"
+                                 "FILE" "REV" "STALE" "TOTAL" "REVIEWED"))
+                (doseq [f files]
+                  (println (format "%-52s %6d %6d %6d  %s"
+                                   (:path f) (:reviewed f) (:stale f) (:total f)
+                                   (fmt-ranges (:reviewed-lines f)))))))
+            (when (seq notes)
+              (println)
+              (println "NOTES")
+              (doseq [n notes]
+                (println (format "  %s%s  %s  [%s]"
+                                 (:path n) (fmt-region n)
+                                 (:ticket n) (name (:state n))))))))))
+
+(defn cmd-stale [{:keys [opts]}]
+  (let [rs (->> (records)
+                (map resolve-region)
+                (filter #(#{:stale :missing} (:state %)))
+                (sort-by (juxt :path #(or (:start %) 0))))]
+    (emit opts {:stale (mapv #(-> (select-keys % [:path :start :end :reason])
+                                  (assoc :state (name (:state %))))
+                             rs)}
+          (fn [_]
+            (if (empty? rs)
+              (println "nothing stale")
+              (doseq [r rs]
+                (println (format "%s%s  %s  (%s)"
+                                 (:path r) (fmt-region r)
+                                 (name (:state r)) (:reason r)))))))))
+
+(defn cmd-next [{:keys [opts]}]
+  (let [by-path (resolved-by-path)
+        limit (or (:limit opts) 20)
+        gaps (->> (eligible-files)
+                  (map #(file-coverage by-path %))
+                  (filter #(pos? (+ (:unreviewed %) (:stale %))))
+                  (sort-by (juxt #(str (fs/parent (fs/path (:path %)))) :path))
+                  (take limit)
+                  (mapv (fn [f]
+                          (assoc f :todo (into (sorted-set)
+                                               (remove (:reviewed-lines f)
+                                                       (range 1 (inc (:total f)))))))))]
+    (emit opts {:next (mapv (fn [f] {:path (:path f)
+                                     :unreviewed (:unreviewed f)
+                                     :stale (:stale f)
+                                     :ranges (fmt-ranges (:todo f))})
+                            gaps)}
+          (fn [_]
+            (if (empty? gaps)
+              (println "everything is reviewed and current")
+              (doseq [f gaps]
+                (println (format "%-52s %5d unread %5d stale  %s"
+                                 (:path f) (:unreviewed f) (:stale f)
+                                 (fmt-ranges (:todo f))))))))))
+
+(defn cmd-coverage [{:keys [opts]}]
+  (let [by-path (resolved-by-path)
+        files (map #(file-coverage by-path %) (eligible-files))
+        total (reduce + 0 (map :total files))
+        rev (reduce + 0 (map :reviewed files))
+        stl (reduce + 0 (map :stale files))
+        unr (- total rev stl)
+        pct #(if (zero? total) 0.0 (* 100.0 (/ (double %) total)))]
+    (emit opts {:eligible-files (count files) :eligible-lines total
+                :never-read unr :reviewed rev :stale stl}
+          (fn [_]
+            (println (format "eligible files   %7d" (count files)))
+            (println (format "eligible lines   %7d" total))
+            (println (format "never read       %7d  %5.1f%%" unr (pct unr)))
+            (println (format "reviewed current %7d  %5.1f%%" rev (pct rev)))
+            (println (format "reviewed stale   %7d  %5.1f%%" stl (pct stl)))))))
+
+;; ---------------------------------------------------------------- cli
+
+(def usage
+  (str/join "\n"
+            ["legu — human review coverage"
+             ""
+             "  legu mark <path>[:<start>-<end>]     mark a region reviewed at HEAD"
+             "  legu note <path>[:<range>] <ticket>  attach a ticket reference"
+             "  legu forget <path>[:<range>]         drop a region's review state"
+             "  legu status [<path>]                 per-file review state"
+             "  legu stale                           regions needing a re-read"
+             "  legu next [--limit N]                what to read next"
+             "  legu coverage                        never-read / reviewed / stale"
+             ""
+             "  --json             machine-readable output"
+             "  --reviewer <name>  who read it (default: git config user.name)"
+             "  --limit <n>        how many files `next` suggests"]))
+
+(def flags {"--json" :flag "--help" :flag "--reviewer" :value "--limit" :int})
+
+(defn parse-args
+  "Options may appear anywhere. Anything unrecognized is an error, never a
+   silently swallowed argument."
+  [argv]
+  (loop [argv (seq argv) opts {} args []]
+    (if-not argv
+      {:opts opts :args args}
+      (let [a (first argv) more (rest argv)]
+        (cond
+          (= a "--") {:opts opts :args (into args more)}
+          (= a "-h") (recur (seq more) (assoc opts :help true) args)
+
+          (str/starts-with? a "--")
+          (let [i (str/index-of a "=")
+                k (if i (subs a 0 i) a)
+                inline (when i (subs a (inc i)))
+                kw (keyword (subs k 2))]
+            (case (get flags k)
+              :flag (recur (seq more) (assoc opts kw (not= "false" inline)) args)
+              :value (let [v (or inline (first more))]
+                       (when (str/blank? v) (die (str k " needs a value")))
+                       (recur (seq (if inline more (rest more))) (assoc opts kw v) args))
+              :int (let [v (or inline (first more))
+                         n (parse-long (str v))]
+                     (when-not (and n (pos? n))
+                       (die (str k " expects a positive integer")))
+                     (recur (seq (if inline more (rest more))) (assoc opts kw n) args))
+              (die (str "unknown option: " k))))
+
+          (and (str/starts-with? a "-") (not= a "-"))
+          (die (str "unknown option: " a))
+
+          :else (recur (seq more) opts (conj args a)))))))
+
+(def commands
+  {"mark" {:fn cmd-mark :max 1} "note" {:fn cmd-note :max 2}
+   "forget" {:fn cmd-forget :max 1} "status" {:fn cmd-status :max 1}
+   "stale" {:fn cmd-stale :max 0} "next" {:fn cmd-next :max 0}
+   "coverage" {:fn cmd-coverage :max 0}})
+
+(defn find-root
+  "The git top level, else the nearest ancestor holding a .review/ store, else
+   the working directory."
+  []
+  (or (git-toplevel)
+      (loop [d (fs/absolutize (fs/cwd))]
+        (cond
+          (nil? d) (str (fs/cwd))
+          (fs/directory? (fs/file (fs/file d) ".review")) (str d)
+          :else (recur (fs/parent d))))))
+
+(defn -main [& argv]
+  (binding [*root* (find-root)
+            *git?* (some? (git-toplevel))]
+    (let [{:keys [opts args]} (parse-args argv)
+          [cmd & rest-args] args]
+      (cond
+        (or (:help opts) (nil? cmd)) (println usage)
+
+        (contains? commands cmd)
+        (let [{:keys [fn max]} (commands cmd)]
+          (when (> (count rest-args) max)
+            (die (str cmd " takes " max " argument" (if (= 1 max) "" "s")
+                      ", got " (count rest-args))))
+          (fn {:args (vec rest-args) :opts opts}))
+
+        :else (die (str "unknown command: " cmd))))))
+
+(apply -main *command-line-args*)
