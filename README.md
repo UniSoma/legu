@@ -2,9 +2,9 @@
 
 Review coverage for a codebase — the reading analogue of test coverage.
 
-`legu` tracks which regions of a repository a human has actually read, notices
-when the code under a read region changes, and reports three numbers: never
-read, read and current, read but stale.
+`legu` tracks which regions of a repository a human has actually reviewed,
+notices when the code under a reviewed region changes, and reports three
+numbers: unreviewed, reviewed, stale.
 
 It knows nothing about any programming language. Regions are line ranges;
 anchoring is git plus a content hash. It works the same on Clojure, YAML, shell
@@ -77,7 +77,7 @@ one was rewritten reports *stale*, which is the honest answer.
 
 A mark relocates only when git reports a **rename**, never a copy. If a file is
 copied and the original then edited inside a reviewed region, the original goes
-stale and the copy counts as unread — the alternative would let a copy absorb
+stale and the copy counts as unreviewed — the alternative would let a copy absorb
 the mark and hide a real change. The cost is that a rename which also leaves a
 new, unrelated file at the old path reports stale rather than following the
 move: conservative in the direction that asks for a re-read.

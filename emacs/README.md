@@ -3,8 +3,8 @@
 Emacs front end for [legu](../README.md), the review coverage tool.
 
 It is a fringe gutter plus one keystroke. The gutter says which lines of the
-file you are looking at you have already read, and which you read but which
-have since changed. `C-c r r` means *everything from where I left off down to
+file you are looking at are reviewed, and which you read but which have since
+changed. `C-c r r` means *everything from where I left off down to
 here, I have now read*.
 
 Nothing here writes `.review/`. Every mutation goes through the `legu` command
@@ -59,7 +59,7 @@ is on.
 | `r` | `legu-mark` | frontier → point; the region if there is one; `C-u` whole file |
 | `R` | `legu-mark-file` | the whole file |
 | `SPC` | `legu-set-frontier` | I am reading from here |
-| `n` `p` | `legu-next-gap` `legu-previous-gap` | next unread or stale line here |
+| `n` `p` | `legu-next-gap` `legu-previous-gap` | next unreviewed or stale line here |
 | `]` `[` | `legu-next-stale` `legu-previous-stale` | next stale region here |
 | `s` | `legu-diff-stale` | what changed since I read it (`C-u` for ediff) |
 | `.` | `legu-describe-region` | who read this, when, at which commit |
@@ -76,17 +76,17 @@ The gutter glyph carries the state; the background is reserved for the alarm.
 
 | | GUI fringe | terminal / margin | background |
 |---|---|---|---|
-| never read | nothing | nothing | none |
-| read, current | solid bar | `│` | none |
-| read, stale | dashed bar | `!` | tinted |
+| unreviewed | nothing | nothing | none |
+| reviewed | solid bar | `│` | none |
+| stale | dashed bar | `!` | tinted |
 | ticket attached | dot, first line only | `*` | — |
 | unverified | thin dashes | `:` | none |
 | reading frontier | triangle | `>` | — |
 
-A fully unread file looks exactly like a file without the mode, which is the
+A fully unreviewed file looks exactly like a file without the mode, which is the
 right visual cost for the buffers you open to grep something.
 
-The mode line shows repo-wide percent read and this buffer's stale count:
+The mode line shows repo-wide percent reviewed and this buffer's stale count:
 ` legu 61%▪3`. A trailing `?` means legu cannot currently vouch for what is
 drawn; `!` means the store is unreadable; `—` means the file is outside the
 eligible set.
@@ -252,7 +252,7 @@ emacs -Q --batch -L . -L /path/to/evil -L /path/to/goto-chg \
 ## Known limits
 
 - **Renames are a blind spot for tier 0.** Sidecars are keyed by the path at
-  review time, so a region read under an old name paints as unread until the
+  review time, so a region read under an old name paints as unreviewed until the
   next snapshot lands — seconds, bounded by the `.review/` watcher, not a
   session. `legu-test-integration-rename-is-the-documented-tier0-blind-spot`
   asserts this, so a future fix breaks visibly.
