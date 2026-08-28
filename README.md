@@ -139,21 +139,11 @@ store), the eligible set becomes a walk of the working tree rather than
 `git ls-files`, and **`.reviewignore` is inert** — the gitignore matching is
 git's, not ours.
 
-## Decisions taken
+## Decisions
 
-- **Review state is global, not per-branch.** Simpler, and the anchoring works
-  across branches anyway, since it re-derives everything from content.
-- **Whole-region staleness.** No partial invalidation.
-- **Neither `git log -L` nor `git blame`** for projection. Diff-hunk shifting
-  plus a content hash is faster than both and answers the actual question — did
-  the content change? — rather than a proxy for it.
-- **Deleted files** keep their records, which report as `missing` in
-  `legu stale`; they drop out of the eligible set, so coverage is unaffected.
-- **Re-marking supersedes only an exact match.** Marking a region replaces any
-  record that currently resolves to the same place, wherever its sidecar lives —
-  so re-reviewing after a rename leaves no ghost. A record whose projection has
-  drifted to a slightly different range is a different region; re-mark the range
-  `legu stale` prints, or drop it with `legu forget`.
+The vocabulary is in [CONTEXT.md](CONTEXT.md); the decisions that shaped the
+tool, and the alternatives they rejected, are one paragraph each under
+[docs/adr/](docs/adr/).
 
 ## Known limits
 
