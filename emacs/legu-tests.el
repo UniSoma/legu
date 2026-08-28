@@ -8,11 +8,18 @@
 ;; Two tiers.  The first is pure: range arithmetic, the EDN reader, the
 ;; derived numbers, painting precedence, overlay lifecycle.  The second
 ;; drives the real legu binary against a real scratch git repository, and
-;; skips itself when that binary is not installed.
+;; skips itself when that binary is not installed.  A third group covers
+;; evil, and skips itself when evil is not installed.
 ;;
 ;; Run them with:
 ;;
 ;;   emacs -Q --batch -L . -l legu-tests.el -f ert-run-tests-batch-and-exit
+;;
+;; and, to include the evil group, with evil and evil-collection on the
+;; load path -- for example
+;;
+;;   emacs -Q --batch -L . -L ~/.emacs.d/elpa/... -l legu-tests.el \
+;;         -f ert-run-tests-batch-and-exit
 
 ;;; Code:
 
@@ -20,6 +27,16 @@
 (require 'legu)
 (require 'legu-list)
 (require 'legu-diff)
+
+(declare-function evil-local-mode "evil-core")
+(declare-function evil-normal-state "evil-states")
+(declare-function evil-visual-line "evil-states")
+(declare-function evil-visual-state-p "evil-states")
+(declare-function evil-exit-visual-state "evil-states")
+(declare-function evil-normalize-keymaps "evil-core")
+(declare-function evil-next-line "evil-commands")
+(declare-function evil-previous-line "evil-commands")
+(declare-function legu-evil--exit-visual-state "legu-evil")
 
 (defun legu-test--binary-p ()
   "Whether the real legu CLI is available."
@@ -981,6 +998,147 @@ FILES is a list of (RELPATH . CONTENT).  Skips unless legu is installed."
                 (should (= 20 (alist-get 'start
                                          (legu-region-record-at root "a.txt" 20)))))))
         (kill-buffer buffer)))))
+
+;;;; Evil
+
+;; What evil highlights is not what `region-beginning' and `region-end'
+;; report, and legu records lines: every case below marked the wrong lines
+;; before `legu--visual-region' existed.  `V' on one line was the worst --
+;; mark and point end up equal, `use-region-p' is nil, and the mark fell
+;; through to "from the frontier down to point", recording lines above the
+;; selection that nobody had read.
+
+(defun legu-test--evil-p ()
+  "Whether evil is installed."
+  (require 'evil nil t))
+
+(defmacro legu-test--with-evil-buffer (contents &rest body)
+  "Run BODY in a live buffer of CONTENTS with evil on, in normal state."
+  (declare (indent 1))
+  `(let ((buffer (generate-new-buffer " *legu-evil-test*")))
+     (unwind-protect
+         (progn
+           (switch-to-buffer buffer)
+           (with-current-buffer buffer
+             (insert ,contents)
+             (evil-local-mode 1)
+             (evil-normal-state)
+             (evil-normalize-keymaps)
+             ,@body))
+       (kill-buffer buffer))))
+
+(ert-deftest legu-test-evil-visual-selection-names-the-lines-evil-highlights ()
+  (skip-unless (legu-test--evil-p))
+  (require 'legu-evil)
+  (dolist (case '(("V" 2 . 2) ("Vj" 2 . 3) ("Vjj" 2 . 4)
+                  ("v" 2 . 2) ("vj" 2 . 3) ("vjj" 2 . 4) ("vj$" 2 . 3)
+                  ("viw" 2 . 2) ("VG" 2 . 5) ("vG" 2 . 5)))
+    (legu-test--with-evil-buffer "line one\nline two\nline three\nline four\nline five\n"
+      (goto-char (point-min))
+      (forward-line 1)                  ; line 2 of 5
+      (execute-kbd-macro (kbd (car case)))
+      (should (equal (cons (cadr case) (cddr case)) (legu--target-region nil)))
+      ;; and a selection is a selection, so the big-mark confirmation and
+      ;; every other caller sees one
+      (should (legu--selection-p))
+      (evil-exit-visual-state))))
+
+(ert-deftest legu-test-evil-rows-in-region-collects-every-selected-row ()
+  (skip-unless (legu-test--evil-p))
+  (require 'legu-evil)
+  (legu-test--with-evil-buffer ""
+    (let ((inhibit-read-only t))
+      (legu-list-mode)
+      (evil-local-mode 1)
+      (evil-normal-state)
+      (insert "heading\n")
+      (legu-list--row "a.txt" 1 10 'stale "one")
+      (legu-list--row "b.txt" 5 15 'stale "two")
+      (legu-list--row "c.txt" 1 20 'stale "three"))
+    (goto-char (point-min))
+    (forward-line 1)                    ; the a.txt row
+    (execute-kbd-macro (kbd "Vj"))
+    (should (equal '("a.txt" "b.txt")
+                   (mapcar (lambda (r) (plist-get r :path))
+                           (legu-list--rows-in-region))))
+    (evil-exit-visual-state)
+    (goto-char (point-min))
+    (forward-line 1)
+    (execute-kbd-macro (kbd "V"))
+    (should (equal '("a.txt")
+                   (mapcar (lambda (r) (plist-get r :path))
+                           (legu-list--rows-in-region))))
+    (evil-exit-visual-state)))
+
+(ert-deftest legu-test-evil-queue-keys-are-legus-and-not-compilations ()
+  (skip-unless (legu-test--evil-p))
+  (require 'legu-evil)
+  (legu-test--with-evil-buffer ""
+    (legu-list-mode)
+    (evil-local-mode 1)
+    (evil-normal-state)
+    (evil-normalize-keymaps)
+    ;; RET is the one that matters most: `compile-goto-error' reads the
+    ;; text of the row, `legu-list-visit' reads its properties.
+    (should (eq #'legu-list-visit (key-binding (kbd "RET"))))
+    (should (eq #'revert-buffer (key-binding (kbd "gr"))))
+    (should (eq #'legu-list-mark (key-binding (kbd "r"))))
+    (should (eq #'legu-list-diff (key-binding (kbd "d"))))
+    (should (eq #'legu-list-forget (key-binding (kbd "x"))))
+    (should (eq #'legu-list-note (key-binding (kbd "a"))))
+    (should (eq #'legu-dispatch (key-binding (kbd "?"))))
+    ;; motions stay motions
+    (should (eq #'evil-next-line (key-binding (kbd "j"))))
+    (should (eq #'evil-previous-line (key-binding (kbd "k"))))
+    ;; and marking is reachable from visual state, where the selection is
+    (evil-visual-line)
+    (evil-normalize-keymaps)
+    (should (eq #'legu-list-mark (key-binding (kbd "r"))))
+    (evil-exit-visual-state)))
+
+(ert-deftest legu-test-evil-source-buffer-keeps-its-prefix-and-gains-motions ()
+  (skip-unless (legu-test--evil-p))
+  (require 'legu-evil)
+  (legu-test--with-evil-buffer "one\ntwo\nthree\n"
+    (setq-local legu-mode t)
+    (evil-normalize-keymaps)
+    ;; the prefix works unchanged in normal state
+    (should (eq #'legu-mark (key-binding (kbd "C-c r r"))))
+    (should (eq #'legu-set-frontier (key-binding (kbd "C-c r SPC"))))
+    ;; and the bracket motions are there
+    (should (eq #'legu-next-stale (key-binding (kbd "]r"))))
+    (should (eq #'legu-previous-stale (key-binding (kbd "[r"))))
+    (should (eq #'legu-next-gap (key-binding (kbd "]g"))))
+    (should (eq #'legu-previous-gap (key-binding (kbd "[g"))))))
+
+(ert-deftest legu-test-evil-quitting-the-diff-restores-the-windows ()
+  (skip-unless (legu-test--evil-p))
+  (require 'legu-evil)
+  ;; evil-collection binds `q' to `quit-window' in a minor mode map that no
+  ;; major mode keymap outranks, which would drop the saved window
+  ;; configuration on the floor; a remap catches it whoever bound it.
+  (should (eq #'legu-diff-quit
+              (lookup-key legu-diff-mode-map [remap quit-window])))
+  (legu-test--with-evil-buffer ""
+    (legu-diff-mode)
+    (evil-local-mode 1)
+    (evil-normal-state)
+    (evil-normalize-keymaps)
+    (should (eq #'legu-diff-quit (key-binding (kbd "q"))))
+    (should (eq #'legu-diff-remark (key-binding (kbd "r"))))
+    (should (eq #'legu-diff-ediff (key-binding (kbd "="))))))
+
+(ert-deftest legu-test-evil-marking-ends-the-selection ()
+  (skip-unless (legu-test--evil-p))
+  (require 'legu-evil)
+  (should (advice-member-p #'legu-evil--exit-visual-state 'legu-mark))
+  (legu-test--with-evil-buffer "one\ntwo\nthree\n"
+    (goto-char (point-min))
+    (execute-kbd-macro (kbd "Vj"))
+    (should (evil-visual-state-p))
+    (legu-evil--exit-visual-state)
+    (should-not (evil-visual-state-p))))
+
 
 (defun legu-test--line-pos (line)
   "Position of LINE in the current temp buffer."

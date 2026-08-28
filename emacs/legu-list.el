@@ -266,13 +266,21 @@ colon still visits correctly."
 
 (defun legu-list--rows-in-region ()
   "Every row the active region touches, or the row at point."
-  (if (not (use-region-p))
+  (if (not (legu--selection-p))
       (when-let* ((row (legu-list--at-point))) (list row))
     ;; The region end has to be read before point moves, and a row is a
     ;; duplicate of any row already collected, not merely of the last one.
-    (let ((rows nil) (end (region-end)))
+    ;; Under evil the selection is what evil highlighted, not mark..point:
+    ;; `V\=' on one row leaves those equal, and `Vj\=' stops one row short.
+    (let* ((visual (legu--visual-region))
+           (beg (if visual (car visual) (region-beginning)))
+           ;; Both ends are exclusive here: a plain region that stops at the
+           ;; start of a row does not select it, and evil's visual end is
+           ;; exclusive by construction.
+           (end (if visual (cdr visual) (region-end)))
+           (rows nil))
       (save-excursion
-        (goto-char (region-beginning))
+        (goto-char beg)
         (while (< (point) end)
           (when-let* ((row (legu-list--at-point)))
             (unless (member row rows) (push row rows)))

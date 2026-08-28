@@ -103,6 +103,21 @@ prompts, nil refuses."
   :type 'number
   :group 'legu)
 
+(defcustom legu-evil-integration t
+  "Whether to bind the queue and diff buffers for evil, when evil is present.
+Without this the queue buffer is not usable in normal state: see
+`legu-evil-setup\='."
+  :type 'boolean
+  :group 'legu)
+
+(defcustom legu-evil-source-motions t
+  "Whether to add unimpaired-style motions to source buffers under evil.
+Adds `]r\=' and `[r\=' for stale regions and `]g\=' and `[g\=' for gaps in
+`legu-mode\=' buffers, in normal state.  Both pairs are unbound in evil,
+evil-collection and Doom."
+  :type 'boolean
+  :group 'legu)
+
 (defcustom legu-watch-store t
   "Whether to watch `.review/' for changes made outside Emacs."
   :type 'boolean
@@ -984,6 +999,33 @@ for content it never saw."
            (line (max 1 (if gaps (car (car gaps)) total))))
       (setq legu--frontier (copy-marker (legu--line-position line) t)))))
 
+(defvar evil-visual-beginning)
+(defvar evil-visual-end)
+
+(defun legu--visual-region ()
+  "The (BEG . END) buffer positions evil's visual selection covers, or nil.
+
+Emacs's region is not the selection evil draws.  A linewise `V\='
+leaves mark and point on the same line, so `use-region-p\=' is nil and a
+mark would silently fall back to the frontier; an inclusive `v\='
+selection ends one character before its last selected character, so a
+mark would drop the last line the user read.  `evil-visual-end\=' is the
+exclusive end of what evil actually highlighted, which is the only thing
+here that matches what the user saw."
+  (when (and (bound-and-true-p evil-local-mode)
+             (fboundp 'evil-visual-state-p)
+             (evil-visual-state-p)
+             (markerp (bound-and-true-p evil-visual-beginning))
+             (markerp (bound-and-true-p evil-visual-end)))
+    (let ((beg (marker-position evil-visual-beginning))
+          (end (marker-position evil-visual-end)))
+      (when (and beg end)
+        (cons (min beg end) (max beg end))))))
+
+(defun legu--selection-p ()
+  "Whether the user has selected text, under evil or without it."
+  (or (legu--visual-region) (use-region-p)))
+
 (defun legu--line-position (line)
   "Buffer position of the start of file line LINE.
 Narrowing is invisible to legu: the CLI counts lines in the file, so
@@ -1094,17 +1136,23 @@ and the diff buffer name a region without faking a selection."
           (cons (string-to-number (match-string 1 s))
                 (string-to-number (match-string 2 s)))
         (user-error "legu: not a line range: %s" s))))
-   ((use-region-p)
-    (let* ((beg (region-beginning)) (end (region-end))
+   ((legu--selection-p)
+    (let* ((visual (legu--visual-region))
+           (beg (if visual (car visual) (region-beginning)))
+           (end (if visual (cdr visual) (region-end)))
            (total (legu--buffer-lines))
            (start-line (min (legu--line-number beg) (max 1 total)))
-           (end-line (legu--line-number end))
-           ;; A region ending at column 0 does not include that line.
-           (end-line (if (and (> end-line start-line)
-                              (= end (legu--line-position end-line)))
-                         (1- end-line)
-                       end-line)))
-      (cons start-line (min end-line (max 1 total)))))
+           (end-line
+            (if visual
+                ;; evil's end is exclusive: the last character selected is
+                ;; the one before it.
+                (legu--line-number (max beg (1- end)))
+              (let ((line (legu--line-number end)))
+                ;; A region ending at column 0 does not include that line.
+                (if (and (> line start-line) (= end (legu--line-position line)))
+                    (1- line)
+                  line)))))
+      (cons start-line (min (max end-line start-line) (max 1 total)))))
    (t
     (let* ((total (max 1 (legu--buffer-lines)))
            (here (min (legu--line-number) total))
@@ -1144,7 +1192,7 @@ everything you have just read.  With a region, marks that region.  With
                     (car before) (cdr before) (car after) (cdr after)))))
   (let* ((region (legu--target-region arg))
          (span (and region (1+ (- (cdr region) (car region))))))
-    (when (and span (not (use-region-p)) (not (equal arg '(16)))
+    (when (and span (not (legu--selection-p)) (not (equal arg '(16)))
                (> span legu-frontier-max)
                (not (y-or-n-p (format "Mark %d lines (%d-%d) read? "
                                       span (car region) (cdr region)))))
@@ -1752,4 +1800,10 @@ it does not count."
   :group 'legu)
 
 (provide 'legu)
+
+;; After the `provide' above, because this body runs immediately when evil is
+;; already loaded, and legu-evil requires the rest of the package back.
+(with-eval-after-load 'evil
+  (when legu-evil-integration (require 'legu-evil)))
+
 ;;; legu.el ends here

@@ -26,7 +26,12 @@
   :parent diff-mode-map
   "r" #'legu-diff-remark
   "e" #'legu-diff-ediff
-  "q" #'legu-diff-quit)
+  "q" #'legu-diff-quit
+  ;; evil-collection binds `q' to `quit-window' in a minor mode map, which
+  ;; outranks any major mode's -- and quitting without restoring the window
+  ;; configuration is exactly what this buffer must not do.  A remap catches
+  ;; it whoever bound it.
+  "<remap> <quit-window>" #'legu-diff-quit)
 
 (define-derived-mode legu-diff-mode diff-mode "legu-diff"
   "What changed in a region since it was read.

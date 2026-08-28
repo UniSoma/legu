@@ -90,7 +90,8 @@ HEAD, so an uncommitted edit shows up as stale immediately.
 
 `emacs/` holds `legu.el`, an Emacs 30 front end: a fringe gutter showing which
 lines of the file you are looking at have been read, and one keystroke meaning
-"everything from where I left off down to here, I have now read". See
+"everything from where I left off down to here, I have now read". Evil and
+Doom users are supported out of the box. See
 [emacs/README.md](emacs/README.md).
 
 ## Storage
