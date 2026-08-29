@@ -56,7 +56,7 @@
     ("J" "next file" legu-next-file)]
    ["Store"
     ("k" "forget region" legu-forget)
-    ("t" "attach ticket" legu-note)
+    ("t" "anchor ticket" legu-ticket)
     ("T" "visit ticket" legu-visit-ticket)]]
   [["Query"
     ("." "describe at point" legu-describe-region)

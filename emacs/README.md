@@ -63,7 +63,7 @@ is on.
 | `]` `[` | `legu-next-stale` `legu-previous-stale` | next stale region here |
 | `s` | `legu-diff-stale` | what changed since I read it (`C-u` for ediff) |
 | `.` | `legu-describe-region` | who read this, when, at which commit |
-| `t` `T` | `legu-note` `legu-visit-ticket` | attach / open a ticket id |
+| `t` `T` | `legu-ticket` `legu-visit-ticket` | anchor / open a ticket id |
 | `k` | `legu-forget` | drop this region's state |
 | `l` `J` | `legu-list` `legu-next-file` | the queue / straight to the next file |
 | `c` `g` | `legu-coverage` `legu-refresh` | the three numbers / repaint (`C-u` re-runs legu) |
@@ -79,7 +79,7 @@ The gutter glyph carries the state; the background is reserved for the alarm.
 | unreviewed | nothing | nothing | none |
 | reviewed | solid bar | `│` | none |
 | stale | dashed bar | `!` | tinted |
-| ticket attached | dot, first line only | `*` | — |
+| ticket anchored | dot, first line only | `*` | — |
 | unverified | thin dashes | `:` | none |
 | reading frontier | triangle | `>` | — |
 
@@ -215,7 +215,7 @@ read-only buffer frees up:
 | `gj` `gk`, `]]` `[[` | next / previous row | evil-collection's, kept |
 | `r` | `legu-list-mark` | also in visual state, for several rows at once |
 | `d` | `legu-list-diff` | |
-| `a` | `legu-list-note` | attach a ticket |
+| `a` | `legu-list-ticket` | anchor a ticket |
 | `x` | `legu-list-forget` | |
 | `c` `gf` | `legu-coverage` / cycle the filter | |
 | `gr` | refresh | |
@@ -263,7 +263,7 @@ the mark it produced.
 emacs -Q --batch -L . -l legu-tests.el -f ert-run-tests-batch-and-exit
 ```
 
-87 tests. The pure half covers range arithmetic, the EDN reader, the derived
+93 tests. The pure half covers range arithmetic, the EDN reader, the derived
 coverage numbers, the dired column's sums and formatting, painting
 precedence and the overlay lifecycle. The other
 half drives the real `legu` binary against real scratch git repositories —
@@ -306,7 +306,7 @@ emacs -Q --batch -L . -L /path/to/evil -L /path/to/goto-chg \
 
 ## Not built, on purpose
 
-No prose annotation (`legu note` takes a ticket id, and the ticket tracker
+No prose annotation (`legu ticket` takes a ticket id, and the ticket tracker
 owns the rest). No approval or PR workflow. No dashboard tree — dired with
 the coverage column is the tree. No inline diff renderer — stock `diff-mode`
 in a window. No batch flag/execute state machine.

@@ -38,7 +38,7 @@
 (declare-function evil-exit-visual-state "evil-states")
 
 (defconst legu-evil--selection-commands
-  '(legu-mark legu-note legu-forget legu-list-mark)
+  '(legu-mark legu-ticket legu-forget legu-list-mark)
   "Commands that consume a selection, and so should end visual state.")
 
 (defun legu-evil--exit-visual-state (&rest _)
@@ -66,7 +66,7 @@ is nil.  Also suitable for `evil-collection-setup-hook'."
     "gf" #'legu-list-toggle-filter
     "r" #'legu-list-mark
     "d" #'legu-list-diff
-    "a" #'legu-list-note
+    "a" #'legu-list-ticket
     "x" #'legu-list-forget
     "c" #'legu-coverage
     "?" #'legu-dispatch

@@ -37,7 +37,7 @@
   "o" #'legu-list-visit-other-window
   "r" #'legu-list-mark
   "s" #'legu-list-diff
-  "t" #'legu-list-note
+  "t" #'legu-list-ticket
   "k" #'legu-list-forget
   "f" #'legu-list-toggle-filter
   "g" #'revert-buffer
@@ -357,15 +357,15 @@ opened -- that one is always confirmed by name."
     (unless row (user-error "legu: no row at point"))
     (legu-list--in-source row (lambda (_r) (legu-diff-stale)))))
 
-(defun legu-list-note ()
-  "Attach a ticket to the region at point."
+(defun legu-list-ticket ()
+  "Anchor a ticket to the region at point."
   (interactive)
   (let ((row (legu-list--at-point)))
     (unless row (user-error "legu: no row at point"))
     (legu-list--in-source
      row (lambda (r)
            (let ((region (cons (plist-get r :start) (plist-get r :end))))
-             (legu-note (completing-read
+             (legu-ticket (completing-read
                          (format "Ticket for %s:%d-%d: " (plist-get r :path)
                                  (car region) (cdr region))
                          (funcall legu-ticket-completion-function))

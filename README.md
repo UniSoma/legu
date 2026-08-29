@@ -25,7 +25,7 @@ cp legu ~/.local/bin/legu   # anywhere on PATH
 ```
 legu mark src/core.clj:40-95           # mark a region reviewed at HEAD
 legu mark src/core.clj                 # the whole file
-legu note src/core.clj:40-95 lgu-01k7  # anchor a ticket to a region
+legu ticket src/core.clj:40-95 lgu-01k7  # anchor a ticket reference to a region
 legu forget src/core.clj:40-95         # drop that region's state
 legu status [<path>]                   # per-file state, for a file or a subtree
 legu stale                             # regions that need a re-read
@@ -109,9 +109,8 @@ tree — committed alongside the code. Source files are never modified.
  :regions [{:start 40 :end 95
             :commit "a1b2c3…"
             :file-hash "…" :content-hash "…"
-            :reviewer "jonas" :timestamp "2026-08-28T01:00:00Z"
-            :notes ["lgu-01k7"]}]
- :notes [{:start 40 :end 95 :ticket "lgu-01k7" :commit "a1b2c3…" …}]}
+            :reviewer "jonas" :timestamp "2026-08-28T01:00:00Z"}]
+ :tickets [{:start 40 :end 95 :ticket "lgu-01k7" :commit "a1b2c3…" …}]}
 ```
 
 One file per source file rather than a single index, so two people reviewing at
@@ -128,11 +127,13 @@ negations and directory patterns behave exactly as you expect.
 
 Binary files (detected by a NUL byte in the first 8 KB) count as one line.
 
-## Notes are ticket references, not prose
+## Ticket references, not prose
 
-`legu note` stores a ticket id against a region. The note content and lifecycle
-belong to a ticket tracker; legu owns only the anchor, and re-anchors it exactly
-the way it re-anchors review regions.
+`legu ticket` stores a ticket id against a region. The ticket's content and
+lifecycle belong to a ticket tracker; legu owns only the anchor, and re-anchors
+it exactly the way it re-anchors review regions. A ticket reference is an
+anchor of its own: re-marking the lines it sits in retires the review record,
+not the reference.
 
 ## Outside git
 

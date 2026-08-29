@@ -105,23 +105,22 @@
    \"be9c2c9ae93d3e3f9279aed5036406b927bac3257ea456970903bb0bcf9c65f9\",
    :content-hash \"d65c7b\",
    :reviewer \"a \\\"quoted\\\" name\",
-   :timestamp \"2026-08-28T10:00:28.735025487Z\",
-   :notes [\"lgu-01k7\" \"lgu-02\"]}],
- :notes
+   :timestamp \"2026-08-28T10:00:28.735025487Z\"}],
+ :tickets
  [{:start 10, :end 20, :ticket \"lgu-01k7\", :opaque true, :file-hash \"be9c2c\"}]}
 ")
 
 (ert-deftest legu-test-edn-reads-a-real-sidecar ()
   (let* ((data (legu--read-edn legu-test--sidecar))
          (region (car (alist-get 'regions data)))
-         (note (car (alist-get 'notes data))))
+         (ticket (car (alist-get 'tickets data))))
     (should (eql 1 (alist-get 'schema data)))
     (should (equal "src/a.txt" (alist-get 'path data)))
     (should (eql 10 (alist-get 'start region)))
     (should (eql 20 (alist-get 'end region)))
     (should (equal "a \"quoted\" name" (alist-get 'reviewer region)))
-    (should (equal '("lgu-01k7" "lgu-02") (alist-get 'notes region)))
-    (should (eq t (alist-get 'opaque note)))))
+    (should (equal "lgu-01k7" (alist-get 'ticket ticket)))
+    (should (eq t (alist-get 'opaque ticket)))))
 
 (ert-deftest legu-test-edn-never-signals ()
   (dolist (bad (list "<<<<<<< HEAD\n{:schema 1}\n=======\n"
@@ -245,18 +244,18 @@
 
 (ert-deftest legu-test-paint-then-clear-leaves-nothing ()
   (legu-test--with-buffer 20
-    (legu-overlay-paint :reviewed '((3 . 5)) :stale '((10 . 11)) :notes '(3))
+    (legu-overlay-paint :reviewed '((3 . 5)) :stale '((10 . 11)) :tickets '(3))
     (should (> (length (legu-test--legu-overlays)) 0))
     (legu-overlay-clear)
     (should (= 0 (length (legu-test--legu-overlays))))))
 
-(ert-deftest legu-test-note-glyph-wins-the-line ()
+(ert-deftest legu-test-ticket-glyph-wins-the-line ()
   (legu-test--with-buffer 20
-    (legu-overlay-paint :reviewed '((3 . 5)) :notes '(3))
+    (legu-overlay-paint :reviewed '((3 . 5)) :tickets '(3))
     (let ((states (mapcar (lambda (o) (overlay-get o 'legu-state))
                           (legu-test--legu-overlays))))
-      (should (memq 'note states))
-      ;; Exactly one overlay per line: 3 is the note, 4 and 5 reviewed.
+      (should (memq 'ticket states))
+      ;; Exactly one overlay per line: 3 is the ticket, 4 and 5 reviewed.
       (should (= 3 (length states))))))
 
 (ert-deftest legu-test-unverified-drops-the-alarm-background ()
@@ -671,7 +670,7 @@ FILES is a list of (RELPATH . CONTENT).  Skips unless legu is installed."
   (unless (legu-test--binary-p) (ert-skip "the legu CLI is not installed"))
   (let ((result (legu-test--legu "--help")))
     (should (= 0 (nth 0 result)))
-    (dolist (word '("mark" "note" "forget" "status" "stale" "next" "coverage"
+    (dolist (word '("mark" "ticket" "forget" "status" "stale" "next" "coverage"
                     "--json" "--reviewer" "--limit"))
       (should (string-match-p (regexp-quote word) (nth 1 result))))))
 
@@ -889,12 +888,27 @@ The record then anchors, stale, at 11-21."
   ;; record.
   (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 40) "\n")))
     (legu-test--legu "mark" "a.txt:10-20")
-    (legu-test--legu "note" "a.txt:12-14" "T-1")
+    (legu-test--legu "ticket" "a.txt:12-14" "T-1")
     (legu-test--push-a-txt-down-and-change-it root)
     (legu-test--legu "mark" "a.txt:10-22")
     (let ((records (legu-sidecar-records root "a.txt")))
       (should (= 1 (length (plist-get records :regions))))
-      (should (= 1 (length (plist-get records :notes)))))))
+      (should-not (alist-get 'notes (car (plist-get records :regions))))
+      (should (= 1 (length (plist-get records :tickets))))
+      (should (equal "T-1" (alist-get 'ticket (car (plist-get records :tickets))))))))
+
+(ert-deftest legu-test-integration-a-sidecar-with-the-old-notes-key-is-an-error ()
+  ;; The vector was renamed to :tickets (ADR-0012).  There are no stores
+  ;; outside this repository, so the old key is refused rather than migrated.
+  (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 40) "\n")))
+    (let ((sidecar (legu-sidecar-file root "a.txt")))
+      (make-directory (file-name-directory sidecar) t)
+      (with-temp-file sidecar
+        (insert "{:schema 1 :path \"a.txt\" :regions [] :notes []}\n")))
+    (let ((result (legu-test--legu "status")))
+      (should (/= 0 (nth 0 result)))
+      (should (string-match-p "cannot read" (nth 2 result))))
+    (should-not (plist-get (legu-sidecar-records root "a.txt") :ok))))
 
 (ert-deftest legu-test-integration-an-opaque-record-outlives-a-range-mark ()
   ;; A record for a once-empty file is retired by a mark of the whole file it
@@ -1161,7 +1175,7 @@ The record then anchors, stale, at 11-21."
     (should (eq #'legu-list-mark (key-binding (kbd "r"))))
     (should (eq #'legu-list-diff (key-binding (kbd "d"))))
     (should (eq #'legu-list-forget (key-binding (kbd "x"))))
-    (should (eq #'legu-list-note (key-binding (kbd "a"))))
+    (should (eq #'legu-list-ticket (key-binding (kbd "a"))))
     (should (eq #'legu-dispatch (key-binding (kbd "?"))))
     ;; motions stay motions
     (should (eq #'evil-next-line (key-binding (kbd "j"))))

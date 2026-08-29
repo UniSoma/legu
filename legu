@@ -167,13 +167,15 @@
                      (die (str "cannot read " f ": " (ex-message e)))))]
         (when-not (map? v)
           (die (str "cannot read " f ": not a review record")))
-        (doseq [r (concat (:regions v) (:notes v))]
+        (when (contains? v :notes)
+          (die (str "cannot read " f ": :notes was renamed to :tickets (ADR-0012)")))
+        (doseq [r (concat (:regions v) (:tickets v))]
           (when-not (or (:opaque r)
                         (and (int? (:start r)) (int? (:end r))
                              (pos? (:start r)) (<= (:start r) (:end r))))
             (die (str "cannot read " f ": bad line range in " (pr-str r)))))
         v)
-      {:schema 1 :path path :regions [] :notes []})))
+      {:schema 1 :path path :regions [] :tickets []})))
 
 (defn save-state!
   "Writes the sidecar, or removes it when nothing is left to record."
@@ -181,12 +183,12 @@
   (let [f (store-file path)
         by-range (juxt #(or (:start %) 0) #(or (:end %) 0))
         regions (vec (sort-by by-range (:regions state)))
-        notes (vec (sort-by by-range (:notes state)))]
-    (if (and (empty? regions) (empty? notes))
+        tickets (vec (sort-by by-range (:tickets state)))]
+    (if (and (empty? regions) (empty? tickets))
       (when (fs/exists? f) (fs/delete f))
       (do (fs/create-dirs (fs/parent f))
           (spit f (with-out-str (pp/pprint {:schema 1 :path path
-                                            :regions regions :notes notes})))))
+                                            :regions regions :tickets tickets})))))
     state))
 
 (defn stored-paths []
@@ -350,10 +352,12 @@
              r (:regions (load-state path))]
          (assoc r :path path))))
 
-(defn note-records []
+(defn ticket-records
+  "Every stored ticket reference, with :path merged in."
+  []
   (vec (for [path (stored-paths)
-             n (:notes (load-state path))]
-         (assoc n :path path))))
+             t (:tickets (load-state path))]
+         (assoc t :path path))))
 
 (defn- walk-files
   "Every file in the working tree, for when there is no git to ask."
@@ -525,59 +529,52 @@
 (defn- purge!
   "Drop every stored record that `obsolete?` says `region` makes obsolete,
    wherever its sidecar lives — a region re-reviewed after a rename must leave
-   no ghost. Returns the ticket references those records carried."
+   no ghost."
   [region kind obsolete?]
-  (let [carried (atom [])]
-    (doseq [sidecar (stored-paths)
-            :let [state (load-state sidecar)
-                  keep? (fn [r]
-                          (if (obsolete? region (assoc r :path sidecar))
-                            (do (swap! carried into (:notes r)) false)
-                            true))
-                  pruned (update state kind #(vec (filter keep? %)))]
-            :when (not= state pruned)]
-      (save-state! (assoc pruned :path sidecar)))
-    (vec (distinct @carried))))
+  (doseq [sidecar (stored-paths)
+          :let [state (load-state sidecar)
+                keep? #(not (obsolete? region (assoc % :path sidecar)))
+                pruned (update state kind #(vec (filter keep? %)))]
+          :when (not= state pruned)]
+    (save-state! (assoc pruned :path sidecar))))
 
 (defn cmd-mark [{:keys [args opts]}]
   (when-not (first args) (die "mark needs a path"))
   (let [{:keys [path start end opaque cur]} (region-of (first args))
-        whole? (or opaque (and (= 1 start) (= end (count (:lines cur)))))
-        carried (purge! {:path path :start start :end end :whole? whole?}
-                        :regions contained?)
-        state (load-state path)
-        record (cond-> {:start start :end end
-                        :commit (or (head-sha) "-")
-                        :file-hash (:hash cur)
-                        :content-hash (if opaque
-                                        (:hash cur)
-                                        (norm-hash (subvec (:lines cur) (dec start) end)))
-                        :reviewer (reviewer opts)
-                        :timestamp (now)}
-                 opaque (assoc :opaque true)
-                 (seq carried) (assoc :notes carried))]
-    (save-state! (update state :regions #(conj (vec %) record)))
-    (when-let [why (cond
-                     ((ignored-files) path) "is excluded by .reviewignore"
-                     (and *git?* (not ((set (tracked-files)) path))) "is not tracked by git")]
-      (binding [*out* *err*]
-        (println (str "legu: " path " " why " and will not count toward coverage"))))
-    (emit opts {:marked path :start start :end end :commit (:commit record)}
-          (fn [_] (println (format "marked %s%s reviewed at %s"
-                                   path
-                                   (if opaque " (whole file)" (str ":" start "-" end))
-                                   (subs (:commit record) 0
-                                         (min 8 (count (:commit record))))))))))
+        whole? (or opaque (and (= 1 start) (= end (count (:lines cur)))))]
+    (purge! {:path path :start start :end end :whole? whole?} :regions contained?)
+    (let [state (load-state path)
+          record (cond-> {:start start :end end
+                          :commit (or (head-sha) "-")
+                          :file-hash (:hash cur)
+                          :content-hash (if opaque
+                                          (:hash cur)
+                                          (norm-hash (subvec (:lines cur) (dec start) end)))
+                          :reviewer (reviewer opts)
+                          :timestamp (now)}
+                   opaque (assoc :opaque true))]
+      (save-state! (update state :regions #(conj (vec %) record)))
+      (when-let [why (cond
+                       ((ignored-files) path) "is excluded by .reviewignore"
+                       (and *git?* (not ((set (tracked-files)) path))) "is not tracked by git")]
+        (binding [*out* *err*]
+          (println (str "legu: " path " " why " and will not count toward coverage"))))
+      (emit opts {:marked path :start start :end end :commit (:commit record)}
+            (fn [_] (println (format "marked %s%s reviewed at %s"
+                                     path
+                                     (if opaque " (whole file)" (str ":" start "-" end))
+                                     (subs (:commit record) 0
+                                           (min 8 (count (:commit record)))))))))))
 
-(defn cmd-note [{:keys [args opts]}]
+(defn cmd-ticket [{:keys [args opts]}]
   (let [[t ticket] args]
-    (when-not t (die "note needs a path"))
-    (when (str/blank? ticket) (die "note needs a ticket id"))
+    (when-not t (die "ticket needs a path"))
+    (when (str/blank? ticket) (die "ticket needs a ticket id"))
     (let [{:keys [path start end opaque cur]} (region-of t)]
-      (purge! {:path path :start start :end end} :notes
+      (purge! {:path path :start start :end end} :tickets
               (fn [region r] (and (= ticket (:ticket r)) (superseded? region r))))
       (let [state (load-state path)
-            note (cond-> {:start start :end end
+            record (cond-> {:start start :end end
                           :ticket ticket
                           :commit (or (head-sha) "-")
                           :file-hash (:hash cur)
@@ -586,11 +583,11 @@
                                           (norm-hash (subvec (:lines cur) (dec start) end)))
                           :timestamp (now)}
                    opaque (assoc :opaque true))]
-        (save-state! (update state :notes #(conj (vec %) note)))
-        (emit opts {:noted path :start start :end end :ticket ticket}
-              (fn [_] (println (format "noted %s%s -> %s"
-                                       path (if opaque "" (str ":" start "-" end))
-                                       ticket))))))))
+        (save-state! (update state :tickets #(conj (vec %) record)))
+        (emit opts {:anchored ticket :path path :start start :end end}
+              (fn [_] (println (format "anchored %s at %s%s"
+                                       ticket
+                                       path (if opaque "" (str ":" start "-" end))))))))))
 
 (defn cmd-forget [{:keys [args opts]}]
   (when-not (first args) (die "forget needs a path"))
@@ -614,7 +611,7 @@
                             true))
                   pruned (-> state
                              (update :regions #(vec (filter keep? %)))
-                             (update :notes #(vec (filter keep? %))))]
+                             (update :tickets #(vec (filter keep? %))))]
             :when (not= state pruned)]
       (save-state! (assoc pruned :path sidecar)))
     (emit opts {:forgot @dropped :path path :start start :end end}
@@ -635,16 +632,16 @@
                    (filter #(under? (:path %) prefix))
                    (map #(file-coverage by-path %))
                    (sort-by :path))
-        notes (->> (note-records)
-                   (map (fn [n] (assoc (resolve-region n) :ticket (:ticket n))))
-                   (filter #(under? (:path %) prefix))
-                   (sort-by (juxt :path #(or (:start %) 0))))
+        tickets (->> (ticket-records)
+                     (map (fn [t] (assoc (resolve-region t) :ticket (:ticket t))))
+                     (filter #(under? (:path %) prefix))
+                     (sort-by (juxt :path #(or (:start %) 0))))
         data {:files (mapv #(-> (dissoc % :reviewed-lines :stale-lines)
                                 (assoc :ranges (fmt-ranges (:reviewed-lines %))))
                            files)
-              :notes (mapv #(-> (select-keys % [:path :start :end :ticket])
-                                (assoc :state (name (:state %))))
-                           notes)}]
+              :tickets (mapv #(-> (select-keys % [:path :start :end :ticket])
+                                  (assoc :state (name (:state %))))
+                             tickets)}]
     (emit opts data
           (fn [_]
             (if (empty? files)
@@ -656,13 +653,13 @@
                   (println (format "%-52s %6d %6d %6d  %s"
                                    (:path f) (:reviewed f) (:stale f) (:total f)
                                    (fmt-ranges (:reviewed-lines f)))))))
-            (when (seq notes)
+            (when (seq tickets)
               (println)
-              (println "NOTES")
-              (doseq [n notes]
+              (println "TICKETS")
+              (doseq [t tickets]
                 (println (format "  %s%s  %s  [%s]"
-                                 (:path n) (fmt-region n)
-                                 (:ticket n) (name (:state n))))))))))
+                                 (:path t) (fmt-region t)
+                                 (:ticket t) (name (:state t))))))))))
 
 (defn cmd-stale [{:keys [opts]}]
   (let [rs (->> (records)
@@ -729,7 +726,7 @@
             ["legu — human review coverage"
              ""
              "  legu mark <path>[:<start>-<end>]     mark a region reviewed at HEAD"
-             "  legu note <path>[:<range>] <ticket>  attach a ticket reference"
+             "  legu ticket <path>[:<range>] <id>    anchor a ticket reference"
              "  legu forget <path>[:<range>]         drop a region's review state"
              "  legu status [<path>]                 per-file review state"
              "  legu stale                           regions needing a re-read"
@@ -777,7 +774,7 @@
           :else (recur (seq more) opts (conj args a)))))))
 
 (def commands
-  {"mark" {:fn cmd-mark :max 1} "note" {:fn cmd-note :max 2}
+  {"mark" {:fn cmd-mark :max 1} "ticket" {:fn cmd-ticket :max 2}
    "forget" {:fn cmd-forget :max 1} "status" {:fn cmd-status :max 1}
    "stale" {:fn cmd-stale :max 0} "next" {:fn cmd-next :max 0}
    "coverage" {:fn cmd-coverage :max 0}})

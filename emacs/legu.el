@@ -401,25 +401,27 @@ half-written merge conflict -- reads as nil and downgrades the caller."
 
 (defun legu-sidecar-records (root relpath)
   "Records stored for RELPATH under ROOT, as a plist.
-The plist has `:regions' and `:notes', each a list of alists, and
-`:ok' which is nil when the sidecar exists but could not be read."
+The plist has `:regions' and `:tickets', each a list of alists, and
+`:ok' which is nil when the sidecar exists but could not be read.  A
+sidecar still carrying the pre-ADR-0012 `:notes' key counts as unreadable,
+exactly as the CLI treats it."
   (let ((file (legu-sidecar-file root relpath)))
     (if (not (and (file-regular-p file) (file-readable-p file)))
-        (list :regions nil :notes nil :ok t)
+        (list :regions nil :tickets nil :ok t)
       (let* ((text (with-temp-buffer
                      (insert-file-contents file)
                      (buffer-string)))
              (data (legu--read-edn text)))
         (cond
-         ((null data) (list :regions nil :notes nil :ok nil))
+         ((or (null data) (assq 'notes data)) (list :regions nil :tickets nil :ok nil))
          ((not (eql 1 (alist-get 'schema data)))
           (unless (member root legu--schema-warned)
             (push root legu--schema-warned)
             (message "legu: sidecar schema %s is newer than this package; painting from the CLI only"
                      (alist-get 'schema data)))
-          (list :regions nil :notes nil :ok nil))
+          (list :regions nil :tickets nil :ok nil))
          (t (list :regions (alist-get 'regions data)
-                  :notes (alist-get 'notes data)
+                  :tickets (alist-get 'tickets data)
                   :ok t)))))))
 
 
@@ -430,27 +432,27 @@ The plist has `:regions' and `:notes', each a list of alists, and
 
 `:reviewed' are ranges legu itself would report reviewed without any
 projection -- records whose stored `:file-hash' still matches the file,
-which is exactly the first branch of the CLI's anchoring.  `:notes' are
-the first lines of matching note records.  `:unresolved' is non-nil when
+which is exactly the first branch of the CLI's anchoring.  `:tickets' are
+the first lines of matching ticket references.  `:unresolved' is non-nil when
 some record could not be confirmed, which is a request for a snapshot,
 never a verdict of staleness."
   (let* ((records (legu-sidecar-records root relpath))
          (hash (and (plist-get records :ok)
-                    (or (plist-get records :regions) (plist-get records :notes))
+                    (or (plist-get records :regions) (plist-get records :tickets))
                     (legu--file-hash file)))
-         (reviewed nil) (notes nil) (unresolved nil))
+         (reviewed nil) (tickets nil) (unresolved nil))
     (dolist (r (plist-get records :regions))
       (let ((start (alist-get 'start r)) (end (alist-get 'end r)))
         (if (and hash start end (equal hash (alist-get 'file-hash r)))
             (push (cons start end) reviewed)
           (setq unresolved t))))
-    (dolist (n (plist-get records :notes))
-      (let ((start (alist-get 'start n)))
-        (if (and hash start (equal hash (alist-get 'file-hash n)))
-            (push start notes)
+    (dolist (tk (plist-get records :tickets))
+      (let ((start (alist-get 'start tk)))
+        (if (and hash start (equal hash (alist-get 'file-hash tk)))
+            (push start tickets)
           (setq unresolved t))))
     (list :reviewed (legu--ranges-normalize reviewed)
-          :notes (sort notes #'<)
+          :tickets (sort tickets #'<)
           :unresolved unresolved
           :hash hash
           :ok (plist-get records :ok))))
@@ -468,6 +470,18 @@ reviewed -- reviewer, timestamp and the commit a diff should run from."
                        (< (- e s) (- (alist-get 'end best) (alist-get 'start best)))))
           (setq best r))))
     best))
+
+(defun legu-tickets-at (root relpath line)
+  "Ticket ids anchored at LINE of RELPATH under ROOT, as stored.
+Ticket references are anchors of their own, independent of any review
+record covering the same lines."
+  (let ((out nil))
+    (dolist (tk (plist-get (legu-sidecar-records root relpath) :tickets))
+      (let ((s (alist-get 'start tk)) (e (alist-get 'end tk))
+            (id (alist-get 'ticket tk)))
+        (when (and s e id (<= s line) (<= line e))
+          (push id out))))
+    (sort (delete-dups out) #'string<)))
 
 (defun legu-region-record-nearest (root relpath line)
   "The stored region record of RELPATH under ROOT lying nearest LINE.
@@ -702,7 +716,7 @@ starts while ROOT has writes in flight; those reschedule it on drain."
   (let ((rows (make-hash-table :test #'equal))
         (eligible (make-hash-table :test #'equal))
         (stale (make-hash-table :test #'equal))
-        (notes (make-hash-table :test #'equal))
+        (tickets (make-hash-table :test #'equal))
         (files 0) (lines 0) (reviewed 0) (nstale 0)
         (queue nil))
     (dolist (f (alist-get 'files sdata))
@@ -719,12 +733,12 @@ starts while ROOT has writes in flight; those reschedule it on drain."
               lines (+ lines (or (alist-get 'total f) 0))
               reviewed (+ reviewed (or (alist-get 'reviewed f) 0))
               nstale (+ nstale (or (alist-get 'stale f) 0)))))
-    (dolist (n (alist-get 'notes sdata))
-      (let ((path (alist-get 'path n)))
-        (puthash path (cons (list (alist-get 'start n) (alist-get 'end n)
-                                  (alist-get 'ticket n) (alist-get 'state n))
-                            (gethash path notes))
-                 notes)))
+    (dolist (tk (alist-get 'tickets sdata))
+      (let ((path (alist-get 'path tk)))
+        (puthash path (cons (list (alist-get 'start tk) (alist-get 'end tk)
+                                  (alist-get 'ticket tk) (alist-get 'state tk))
+                            (gethash path tickets))
+                 tickets)))
     (dolist (r (alist-get 'stale tdata))
       (let ((path (alist-get 'path r)))
         (puthash path (cons (list (alist-get 'start r) (alist-get 'end r)
@@ -736,7 +750,7 @@ starts while ROOT has writes in flight; those reschedule it on drain."
              (list :generation (gethash root legu--generations)
                    :started started
                    :duration (float-time (time-subtract (current-time) started))
-                   :rows rows :eligible eligible :stale stale :notes notes
+                   :rows rows :eligible eligible :stale stale :tickets tickets
                    :coverage (list :files files :lines lines :reviewed reviewed
                                    :stale nstale :never (- lines reviewed nstale))
                    :queue queue
@@ -786,12 +800,12 @@ Ordering reproduces the CLI's `next' exactly."
 
 (defun legu-known-tickets (&optional root)
   "Every ticket id in ROOT's snapshot."
-  (let ((notes (plist-get (legu-snapshot (or root (legu-root))) :notes))
+  (let ((tickets (plist-get (legu-snapshot (or root (legu-root))) :tickets))
         (out nil))
-    (when notes
+    (when tickets
       (maphash (lambda (_p entries)
                  (dolist (e entries) (when (nth 2 e) (push (nth 2 e) out))))
-               notes))
+               tickets))
     (sort (delete-dups out) #'string<)))
 
 
@@ -914,7 +928,7 @@ generation is not bumped: the next real snapshot replaces this wholesale."
   "Whether the region-size nudge has already fired this session.")
 
 (defun legu--compute (&optional buffer)
-  "State to paint in BUFFER, as a plist of `:reviewed' `:stale' `:notes'.
+  "State to paint in BUFFER, as a plist of `:reviewed' `:stale' `:tickets'.
 
 Local computation may confirm \"reviewed, in place\".  It may never
 pronounce \"stale\", \"moved\" or \"missing\": those verdicts come only
@@ -938,10 +952,10 @@ from the CLI, and only from a snapshot newer than the file."
                               (legu--ranges-normalize out))))
            (reviewed (legu--ranges-union (plist-get tier0 :reviewed) snap-reviewed))
            (stale (legu--ranges-subtract snap-stale reviewed))
-           (notes (plist-get tier0 :notes)))
+           (tickets (plist-get tier0 :tickets)))
       (when (and trusted row)
-        (dolist (e (gethash rel (plist-get snapshot :notes)))
-          (when (nth 0 e) (push (nth 0 e) notes))))
+        (dolist (e (gethash rel (plist-get snapshot :tickets)))
+          (when (nth 0 e) (push (nth 0 e) tickets))))
       (setq legu--tier0-unresolved
             (and (plist-get tier0 :unresolved) (not trusted)))
       (setq legu--scope
@@ -952,7 +966,7 @@ from the CLI, and only from a snapshot newer than the file."
                   (t 'unknown)))
       (list :reviewed reviewed
             :stale stale
-            :notes (sort (delete-dups notes) #'<)))))
+            :tickets (sort (delete-dups tickets) #'<)))))
 
 (defun legu--trusted-here (snapshot file tier0)
   "Whether SNAPSHOT may pronounce on FILE, given what TIER0 could confirm.
@@ -992,7 +1006,7 @@ for content it never saw."
           (legu-overlay-paint
            :reviewed (plist-get state :reviewed)
            :stale (plist-get state :stale)
-           :notes (plist-get state :notes)
+           :tickets (plist-get state :tickets)
            :frontier (and legu--frontier
                           (marker-position legu--frontier)
                           (legu--line-number legu--frontier))
@@ -1262,9 +1276,9 @@ everything you have just read.  With a region, marks that region.  With
   (legu--repaint)
   (message "legu: frontier at line %d" (legu--line-number)))
 
-(defun legu-note (ticket &optional arg)
-  "Attach TICKET, an id in an external tracker, to the region at point.
-legu stores the anchor.  The note itself lives in the ticket tracker."
+(defun legu-ticket (ticket &optional arg)
+  "Anchor TICKET, an id in an external tracker, to the region at point.
+legu stores the anchor; the ticket itself lives in the tracker."
   (interactive
    (list (completing-read
           (format "Ticket for %s: "
@@ -1276,20 +1290,20 @@ legu stores the anchor.  The note itself lives in the ticket tracker."
          current-prefix-arg))
   (legu--assert-usable)
   (when (string-empty-p (string-trim ticket))
-    (user-error "legu: note needs a ticket id"))
+    (user-error "legu: ticket needs a ticket id"))
   (legu--ensure-saved)
   (let* ((root legu--root)
          (rel legu--relpath)
          (buffer (current-buffer))
          (target (legu--target-string rel (legu--target-region arg))))
     (legu--enqueue-write
-     root (list "note" target ticket)
+     root (list "ticket" target ticket)
      (lambda (status _stdout stderr)
        (if (eq status 'ok)
-           (progn (message "noted %s -> %s" target ticket)
+           (progn (message "anchored %s at %s" ticket target)
                   (when (buffer-live-p buffer)
                     (with-current-buffer buffer (legu--repaint))))
-         (legu--record-failure root "note" (format "%s %s" target ticket) stderr)
+         (legu--record-failure root "ticket" (format "%s %s" target ticket) stderr)
          (message "%s" (propertize (string-trim stderr) 'face 'warning)))))))
 
 (defun legu-forget (&optional arg)
@@ -1382,9 +1396,11 @@ WHAT names the thing for the error message."
   "Echo the provenance of the region at point."
   (interactive)
   (let* ((line (legu--line-number))
-         (record (legu-region-record-at legu--root legu--relpath line)))
+         (record (legu-region-record-at legu--root legu--relpath line))
+         (tickets (legu-tickets-at legu--root legu--relpath line))
+         (suffix (if tickets (format "  [%s]" (mapconcat #'identity tickets " ")) "")))
     (if (null record)
-        (message "legu: line %d has never been marked read" line)
+        (message "legu: line %d has never been marked read%s" line suffix)
       (message "legu: %s:%s-%s  read %s by %s at %s%s"
                legu--relpath (alist-get 'start record) (alist-get 'end record)
                (substring (or (alist-get 'timestamp record) "?") 0
@@ -1392,16 +1408,13 @@ WHAT names the thing for the error message."
                (or (alist-get 'reviewer record) "?")
                (substring (or (alist-get 'commit record) "?") 0
                           (min 8 (length (or (alist-get 'commit record) "?"))))
-               (if (alist-get 'notes record)
-                   (format "  [%s]" (mapconcat #'identity (alist-get 'notes record) " "))
-                 "")))))
+               suffix))))
 
 (defun legu-visit-ticket ()
-  "Visit the ticket attached to the region at point."
+  "Visit the ticket anchored at point."
   (interactive)
   (let* ((line (legu--line-number))
-         (record (legu-region-record-at legu--root legu--relpath line))
-         (tickets (alist-get 'notes record)))
+         (tickets (legu-tickets-at legu--root legu--relpath line)))
     (if (null tickets)
         (message "legu: no ticket on this region")
       (funcall legu-ticket-visit-function
@@ -1611,7 +1624,7 @@ With a prefix argument REFRESH, refresh the snapshot first."
   "[" #'legu-previous-stale
   "s" #'legu-diff-stale
   "." #'legu-describe-region
-  "t" #'legu-note
+  "t" #'legu-ticket
   "T" #'legu-visit-ticket
   "k" #'legu-forget
   "l" #'legu-list

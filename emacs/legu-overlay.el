@@ -45,14 +45,14 @@ fringe already belongs to `diff-hl'."
   :group 'legu)
 
 (defcustom legu-margin-glyphs
-  '((reviewed . "│") (stale . "!") (note . "*")
+  '((reviewed . "│") (stale . "!") (ticket . "*")
     (unverified . ":") (frontier . ">") (ignored . "~"))
   "Glyphs used in the margin, and on terminals."
   :type '(alist :key-type symbol :value-type string)
   :group 'legu)
 
 (defcustom legu-margin-ascii-glyphs
-  '((reviewed . "|") (stale . "!") (note . "*")
+  '((reviewed . "|") (stale . "!") (ticket . "*")
     (unverified . ":") (frontier . ">") (ignored . "~"))
   "Glyphs used in the margin when ASCII is all that will render."
   :type '(alist :key-type symbol :value-type string)
@@ -77,7 +77,7 @@ fringe already belongs to `diff-hl'."
   "Face tinting a region that needs re-reading.  The only background legu paints."
   :group 'legu)
 
-(defface legu-note '((t :inherit font-lock-constant-face))
+(defface legu-ticket '((t :inherit font-lock-constant-face))
   "Face for the gutter dot beside a region carrying a ticket reference."
   :group 'legu)
 
@@ -119,8 +119,8 @@ fringe already belongs to `diff-hl'."
   (define-fringe-bitmap 'legu-bmp-stale [224 224 0 0] nil nil '(center t))
   ;; A thin dotted line for anything legu cannot currently vouch for.
   (define-fringe-bitmap 'legu-bmp-dashed [128 0] nil nil '(center t))
-  ;; One dot, on the first line of a noted region only.
-  (define-fringe-bitmap 'legu-bmp-note [0 0 96 240 240 96 0 0] nil nil 'center)
+  ;; One dot, on the first line of a region carrying a ticket reference.
+  (define-fringe-bitmap 'legu-bmp-ticket [0 0 96 240 240 96 0 0] nil nil 'center)
   ;; A right pointing triangle: you are here.
   (define-fringe-bitmap 'legu-bmp-frontier
     [128 192 224 240 240 224 192 128] nil nil 'center))
@@ -129,7 +129,7 @@ fringe already belongs to `diff-hl'."
   '((reviewed . legu-bmp-bar)
     (stale . legu-bmp-stale)
     (unverified . legu-bmp-dashed)
-    (note . legu-bmp-note)
+    (ticket . legu-bmp-ticket)
     (frontier . legu-bmp-frontier)
     (ignored . legu-bmp-dashed))
   "Fringe bitmap for each indicator state.")
@@ -138,7 +138,7 @@ fringe already belongs to `diff-hl'."
   '((reviewed . legu-reviewed)
     (stale . legu-stale)
     (unverified . legu-unverified)
-    (note . legu-note)
+    (ticket . legu-ticket)
     (frontier . legu-frontier)
     (ignored . legu-ignored))
   "Face for each indicator state.")
@@ -264,7 +264,7 @@ ten thousand line file one line at a time is otherwise quadratic."
         (when (> end beg) (overlay-put ov 'evaporate t))
         (overlay-put ov 'priority (pcase state
                                     ('reviewed 10) ('stale 20) ('unverified 10)
-                                    ('note 30) ('frontier 30) (_ 15)))
+                                    ('ticket 30) ('frontier 30) (_ 15)))
         (when background (overlay-put ov 'face background))
         (when-let* ((indicator (legu--indicator state style)))
           (overlay-put ov 'before-string indicator))
@@ -272,7 +272,7 @@ ten thousand line file one line at a time is otherwise quadratic."
                      (pcase state
                        ('reviewed "legu: read")
                        ('stale "legu: read, but the content has changed")
-                       ('note "legu: ticket attached")
+                       ('ticket "legu: ticket anchored here")
                        ('unverified "legu: unverified — the file on disk has moved on")
                        ('frontier "legu: reading frontier")
                        ('ignored "legu: outside the eligible set")
@@ -280,10 +280,10 @@ ten thousand line file one line at a time is otherwise quadratic."
         (push ov legu--overlays)
         ov))))
 
-(cl-defun legu-overlay-paint (&key reviewed stale notes frontier unverified out-of-scope)
+(cl-defun legu-overlay-paint (&key reviewed stale tickets frontier unverified out-of-scope)
   "Paint the current buffer.
 
-REVIEWED and STALE are line range sets, NOTES a list of first lines,
+REVIEWED and STALE are line range sets, TICKETS a list of first lines,
 FRONTIER a line number.  With UNVERIFIED, everything is drawn in the
 unverified style and no background is tinted: the file on disk is not
 the file on screen, and legu only ever describes the file on disk."
@@ -296,10 +296,10 @@ the file on screen, and legu only ever describes the file on disk."
         (legu--make-overlay 1 'ignored style)
       (let ((claimed (make-hash-table :test #'eql)))
         ;; Glyph precedence: a ticket, then the frontier, then the alarm.
-        (dolist (line notes)
+        (dolist (line tickets)
           (when (and line (not (gethash line claimed)))
             (puthash line t claimed)
-            (legu--make-overlay line 'note style)))
+            (legu--make-overlay line 'ticket style)))
         (when (and frontier (not (gethash frontier claimed)))
           (puthash frontier t claimed)
           (legu--make-overlay frontier 'frontier style))
