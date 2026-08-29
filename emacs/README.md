@@ -118,7 +118,10 @@ the CLI, and the column redraws when a snapshot lands. Inserted
 subdirectories and `dired-subtree` sections get the column too, and it
 survives `dired-hide-details-mode`. TRAMP and dirvish buffers are left alone.
 The column is read-only — marking happens in the file or from the queue.
-`legu-dired-column` set to nil turns it off.
+The faces are the gutter's own, so the column doubles as its legend:
+reviewed in the gutter's green, stale in the warning face, `?` and `—`
+dimmed. `100%` is bold. There are no colour thresholds — coverage is two
+numbers, not a score. `legu-dired-column` set to nil turns it off.
 
 ## How it stays fast, and honest
 

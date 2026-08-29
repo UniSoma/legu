@@ -70,7 +70,9 @@ CELL is a plist of :total, :reviewed, :stale and :uncertain lines, or
 nil for a file or directory outside the eligible set.  Reviewed is
 floored and stale is ceilinged, so neither rounding error hides work;
 stale is blank at zero; \"?\" marks numbers the snapshot cannot vouch
-for; a dash means there is nothing to count."
+for; a dash means there is nothing to count.  The faces are the gutter's
+own, so the column doubles as its legend; 100% is bold because it is a
+state, not a score -- there are no colour thresholds."
   (let* ((total (or (plist-get cell :total) 0))
          (text
           (if (= total 0)
@@ -78,7 +80,10 @@ for; a dash means there is nothing to count."
             (let ((reviewed (/ (* 100 (plist-get cell :reviewed)) total))
                   (stale (/ (+ (* 100 (plist-get cell :stale)) total -1) total)))
               (concat
-               (format "%d%%" reviewed)
+               (propertize (format "%d%%" reviewed)
+                           'face (if (= reviewed 100)
+                                     '(bold legu-reviewed)
+                                   'legu-reviewed))
                (when (> stale 0)
                  (concat " " (propertize (format "%d%%" stale) 'face 'legu-stale)))
                (when (plist-get cell :uncertain)

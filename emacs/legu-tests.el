@@ -1232,13 +1232,21 @@ FILES is a list of (RELPATH . CONTENT).  Skips unless legu is installed."
                  "—       ")))
 
 (ert-deftest legu-test-dired-cell-faces ()
-  ;; Reviewed is the default face; stale is legu-stale; ? and — are dimmed.
+  ;; The gutter's own faces, so the column doubles as its legend: reviewed
+  ;; is legu-reviewed, stale is legu-stale, ? and — are dimmed.  No
+  ;; thresholds; the one extra signal is bold at 100%, a state, not a score.
   (should (equal (legu-test--faces
                   (legu-dired--format-cell (list :total 100 :reviewed 72 :stale 3 :uncertain t)))
-                 '((?3 . legu-stale) (?% . legu-stale) (?? . legu-unverified))))
+                 '((?7 . legu-reviewed) (?2 . legu-reviewed) (?% . legu-reviewed)
+                   (?3 . legu-stale) (?% . legu-stale) (?? . legu-unverified))))
   (should (equal (legu-test--faces (legu-dired--format-cell nil))
                  '((?— . legu-ignored))))
-  (should-not (legu-test--faces (legu-dired--format-cell (list :total 100 :reviewed 72 :stale 0)))))
+  (should (equal (legu-test--faces (legu-dired--format-cell (list :total 100 :reviewed 100 :stale 0)))
+                 '((?1 . (bold legu-reviewed)) (?0 . (bold legu-reviewed))
+                   (?0 . (bold legu-reviewed)) (?% . (bold legu-reviewed)))))
+  ;; 99% is not 100%.
+  (should (equal (legu-test--faces (legu-dired--format-cell (list :total 1000 :reviewed 999 :stale 0)))
+                 '((?9 . legu-reviewed) (?9 . legu-reviewed) (?% . legu-reviewed)))))
 
 (defmacro legu-test--with-dired-tree (root-var &rest body)
   "Run BODY in a dired buffer over a scratch tree bound to ROOT-VAR.
