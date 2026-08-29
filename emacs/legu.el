@@ -37,6 +37,9 @@
 
 (autoload 'legu-list "legu-list" "Show the reading queue." t)
 (autoload 'legu-list-refresh-buffers "legu-list" "Re-render queue buffers.")
+(autoload 'legu-dired-mode "legu-dired" "Show review coverage in dired." t)
+(autoload 'legu-dired-eligible-p "legu-dired" "Whether dired can carry the column.")
+(autoload 'legu-dired-refresh-buffers "legu-dired" "Re-render dired buffers.")
 (autoload 'legu-diff-stale "legu-diff" "Diff a stale region." t)
 (autoload 'legu-dispatch "legu-transient" "The legu menu." t)
 
@@ -120,6 +123,11 @@ evil-collection and Doom."
 
 (defcustom legu-watch-store t
   "Whether to watch `.review/' for changes made outside Emacs."
+  :type 'boolean
+  :group 'legu)
+
+(defcustom legu-dired-column t
+  "Whether `global-legu-mode' shows the coverage column in dired buffers."
   :type 'boolean
   :group 'legu)
 
@@ -686,7 +694,8 @@ starts while ROOT has writes in flight; those reschedule it on drain."
                      (substring (nth 1 status) 0 (min 200 (length (nth 1 status))))))
           (legu--snapshot-store root sdata tdata started)))))
     (legu--snapshot-refresh-lighters root)
-    (when (featurep 'legu-list) (legu-list-refresh-buffers root))))
+    (when (featurep 'legu-list) (legu-list-refresh-buffers root))
+    (when (featurep 'legu-dired) (legu-dired-refresh-buffers root))))
 
 (defun legu--snapshot-store (root sdata tdata started)
   "Build ROOT's snapshot from parsed SDATA and TDATA, launched at STARTED."
@@ -1075,7 +1084,7 @@ marking one would be rejected."
       (t
        (concat
         (when (and lines (> lines 0))
-          (format " %d%%" (round (* 100.0 (/ (float (plist-get cov :reviewed)) lines)))))
+          (format " %d%%" (/ (* 100 (plist-get cov :reviewed)) lines)))
         (when legu--tier0-unresolved "?")
         (when (> legu--stale-count 0)
           (propertize (format "▪%d" legu--stale-count) 'face 'warning))))))))
@@ -1715,14 +1724,21 @@ to be picked up as they are created."
               (error nil)))))
       (puthash root watched legu--watchers))))
 
+(defun legu--buffer-in-root-p (buf root)
+  "Whether BUF shows ROOT under `legu-mode' or `legu-dired-mode'."
+  (and (equal (buffer-local-value 'legu--root buf) root)
+       (or (buffer-local-value 'legu-mode buf)
+           (and (boundp 'legu-dired-mode)
+                (buffer-local-value 'legu-dired-mode buf)))
+       t))
+
 (defun legu--unwatch-maybe (root)
   "Drop ROOT's watchers once no legu buffer is left in it.
 The buffer being killed is still in `buffer-list' with the mode on, so
 it does not count."
   (unless (seq-some (lambda (buf)
                       (and (not (eq buf (current-buffer)))
-                           (buffer-local-value 'legu-mode buf)
-                           (equal (buffer-local-value 'legu--root buf) root)))
+                           (legu--buffer-in-root-p buf root)))
                     (buffer-list))
     (dolist (entry (gethash root legu--watchers))
       (ignore-errors (file-notify-rm-watch (cdr entry))))
@@ -1730,6 +1746,13 @@ it does not count."
 
 (defvar legu--seen-roots nil
   "Roots that have had a snapshot requested this session.")
+
+(defun legu--first-visit (root)
+  "Ask for ROOT's first snapshot, once per session, after a short idle."
+  (unless (member root legu--seen-roots)
+    (push root legu--seen-roots)
+    (run-with-idle-timer legu-snapshot-initial-delay nil
+                         #'legu-refresh-snapshot root)))
 
 ;;;###autoload
 (define-minor-mode legu-mode
@@ -1764,10 +1787,7 @@ it does not count."
           (legu--repaint)
           (when legu--tier0-unresolved
             (legu-refresh-snapshot root (legu--snapshot-debounce root)))
-          (unless (member root legu--seen-roots)
-            (push root legu--seen-roots)
-            (run-with-idle-timer legu-snapshot-initial-delay nil
-                                 #'legu-refresh-snapshot root)))))
+          (legu--first-visit root))))
     (legu--teardown)))
 
 (defun legu--teardown ()
@@ -1786,18 +1806,38 @@ it does not count."
     (remove-hook 'window-buffer-change-functions #'legu--window-change)))
 
 (defun legu--turn-on-maybe ()
-  "Turn `legu-mode' on where it can do something useful, and nowhere else."
-  (when (and buffer-file-name
-             (not (file-remote-p buffer-file-name))
-             (not (apply #'derived-mode-p legu-exclude-modes))
-             (let ((a (file-attributes buffer-file-name)))
-               (and a (< (file-attribute-size a) legu-max-file-size)))
-             (legu--root-cheap default-directory))
-    (legu-mode 1)))
+  "Turn `legu-mode' on where it can do something useful, and nowhere else.
+A dired buffer under a store gets `legu-dired-mode' instead."
+  (cond
+   ((derived-mode-p 'dired-mode)
+    ;; The cheap gates first, so a dired buffer outside any store never
+    ;; loads legu-dired.
+    (when (and legu-dired-column
+               (not (file-remote-p default-directory))
+               (legu--root-cheap default-directory)
+               (legu-dired-eligible-p))
+      (legu-dired-mode 1)))
+   ((and buffer-file-name
+         (not (file-remote-p buffer-file-name))
+         (not (apply #'derived-mode-p legu-exclude-modes))
+         (let ((a (file-attributes buffer-file-name)))
+           (and a (< (file-attribute-size a) legu-max-file-size)))
+         (legu--root-cheap default-directory))
+    (legu-mode 1))))
 
 ;;;###autoload
 (define-globalized-minor-mode global-legu-mode legu-mode legu--turn-on-maybe
   :group 'legu)
+
+(defun legu--global-mode-off ()
+  "Turn the dired column off everywhere when `global-legu-mode' goes off.
+The globalized mode only knows how to turn `legu-mode' off."
+  (unless global-legu-mode
+    (dolist (buf (buffer-list))
+      (when (and (boundp 'legu-dired-mode) (buffer-local-value 'legu-dired-mode buf))
+        (with-current-buffer buf (legu-dired-mode -1))))))
+
+(add-hook 'global-legu-mode-hook #'legu--global-mode-off)
 
 (provide 'legu)
 

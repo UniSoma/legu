@@ -87,9 +87,38 @@ A fully unreviewed file looks exactly like a file without the mode, which is the
 right visual cost for the buffers you open to grep something.
 
 The mode line shows repo-wide percent reviewed and this buffer's stale count:
-` legu 61%▪3`. A trailing `?` means legu cannot currently vouch for what is
-drawn; `!` means the store is unreadable; `—` means the file is outside the
-eligible set.
+` legu 61%▪3`. The percent is floored, so it never claims a line you have not
+read. A trailing `?` means legu cannot currently vouch for what is drawn; `!`
+means the store is unreadable; `—` means the file is outside the eligible set.
+
+## The dired column
+
+In a dired buffer under a repository with a `.review/` store,
+`global-legu-mode` turns on `legu-dired-mode`, which draws a column before
+each filename:
+
+```
+  48% 2%   src
+  72% 3%?  src/a.el
+  100%     README.md
+  —        docs
+```
+
+Reviewed percent first, floored; then stale percent, ceilinged and blank at
+zero. Unreviewed is the remainder. Both rounding errors point at remaining
+work, never away from it. A directory sums the eligible files beneath it,
+line for line, so a big unreviewed file weighs what it costs. `—` is a file
+outside the eligible set, or a directory with none beneath it. `?` says the
+file — or a file somewhere under the directory — is newer than the snapshot,
+so the numbers describe a version you have since changed; the debounced
+refresh replaces them.
+
+Everything comes from the cached snapshot: opening a dired buffer never runs
+the CLI, and the column redraws when a snapshot lands. Inserted
+subdirectories and `dired-subtree` sections get the column too, and it
+survives `dired-hide-details-mode`. TRAMP and dirvish buffers are left alone.
+The column is read-only — marking happens in the file or from the queue.
+`legu-dired-column` set to nil turns it off.
 
 ## How it stays fast, and honest
 
@@ -136,6 +165,7 @@ refuses. There is no setting that acts on a modified buffer silently.
 | `legu-indicator-style` | `fringe` | or `margin`, `face-only` |
 | `legu-frontier-max` | `400` | confirm above this many lines |
 | `legu-watch-store` | `t` | notice other people's marks landing |
+| `legu-dired-column` | `t` | the coverage column in dired |
 | `legu-ticket-visit-function` | `knot show` | how `T` opens a ticket |
 | `legu-header-line-mode` | off | a one line map of the file |
 | `legu-evil-integration` | `t` | bind the queue and diff buffers for evil |
@@ -230,8 +260,9 @@ the mark it produced.
 emacs -Q --batch -L . -l legu-tests.el -f ert-run-tests-batch-and-exit
 ```
 
-75 tests. The pure half covers range arithmetic, the EDN reader, the derived
-coverage numbers, painting precedence and the overlay lifecycle. The other
+87 tests. The pure half covers range arithmetic, the EDN reader, the derived
+coverage numbers, the dired column's sums and formatting, painting
+precedence and the overlay lifecycle. The other
 half drives the real `legu` binary against real scratch git repositories —
 including the one test that matters most, that `legu--file-hash` reproduces
 the CLI's `:file-hash` byte for byte on files with tabs, CRLF, a non-UTF-8
@@ -273,8 +304,9 @@ emacs -Q --batch -L . -L /path/to/evil -L /path/to/goto-chg \
 ## Not built, on purpose
 
 No prose annotation (`legu note` takes a ticket id, and the ticket tracker
-owns the rest). No approval or PR workflow. No dashboard tree. No inline diff
-renderer — stock `diff-mode` in a window. No batch flag/execute state machine.
+owns the rest). No approval or PR workflow. No dashboard tree — dired with
+the coverage column is the tree. No inline diff renderer — stock `diff-mode`
+in a window. No batch flag/execute state machine.
 No client-side region arithmetic: `legu-mark` issues exactly one `legu mark`.
 No language-shaped mark command — `C-M-h C-c r r` marks a defun using *your*
 Emacs's knowledge of the language, while legu itself stays language-agnostic.

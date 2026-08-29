@@ -27,6 +27,7 @@
 (require 'legu)
 (require 'legu-list)
 (require 'legu-diff)
+(require 'legu-dired)
 
 (declare-function evil-local-mode "evil-core")
 (declare-function evil-normal-state "evil-states")
@@ -323,8 +324,10 @@
   (with-temp-buffer
     (setq-local legu--root "/tmp/x/")
     (let ((legu--snapshots (make-hash-table :test #'equal)))
-      (puthash "/tmp/x/" (list :coverage (list :lines 1000 :reviewed 610 :stale 20
-                                               :never 370 :files 5))
+      ;; 618 of 1000: floor says 61, round would say 62.  The floor points
+      ;; at remaining work, never away from it.
+      (puthash "/tmp/x/" (list :coverage (list :lines 1000 :reviewed 618 :stale 20
+                                               :never 362 :files 5))
                legu--snapshots)
       (setq-local legu--stale-count 3)
       (should (equal (substring-no-properties (legu--lighter)) " legu 61%▪3"))
@@ -1143,6 +1146,224 @@ FILES is a list of (RELPATH . CONTENT).  Skips unless legu is installed."
 (defun legu-test--line-pos (line)
   "Position of LINE in the current temp buffer."
   (save-excursion (goto-char (point-min)) (forward-line (1- line)) (point)))
+
+
+;;;; The dired column
+
+(defun legu-test--cell (cell)
+  "CELL as a comparable list: (TOTAL REVIEWED STALE UNCERTAIN)."
+  (and cell (list (plist-get cell :total) (plist-get cell :reviewed)
+                  (plist-get cell :stale) (and (plist-get cell :uncertain) t))))
+
+(ert-deftest legu-test-dired-directory-cells-are-line-weighted-sums ()
+  (let* ((rows (legu-test--rows '(("src/a.el" 100 72 3)
+                                  ("src/core/b.el" 50 0 0)
+                                  ("README.md" 10 10 0))))
+         (uncertain (lambda (path) (equal path "src/core/b.el")))
+         (cells (legu-dired--directory-cells rows "" uncertain)))
+    ;; Every ancestor gets the file's lines; the root is the empty key.
+    (should (equal (legu-test--cell (gethash "" cells)) '(160 82 3 t)))
+    (should (equal (legu-test--cell (gethash "src" cells)) '(150 72 3 t)))
+    (should (equal (legu-test--cell (gethash "src/core" cells)) '(50 0 0 t)))
+    ;; A directory with no eligible file beneath it has no cell at all.
+    (should-not (gethash "docs" cells))
+    ;; Files are not directories.
+    (should-not (gethash "src/a.el" cells))))
+
+(ert-deftest legu-test-dired-directory-cells-inherit-uncertainty-only-from-beneath ()
+  (let* ((rows (legu-test--rows '(("src/a.el" 100 72 3)
+                                  ("src/core/b.el" 50 0 0))))
+         (uncertain (lambda (path) (equal path "src/a.el")))
+         (cells (legu-dired--directory-cells rows "" uncertain)))
+    (should (equal (legu-test--cell (gethash "src" cells)) '(150 72 3 t)))
+    (should (equal (legu-test--cell (gethash "src/core" cells)) '(50 0 0 nil)))))
+
+(ert-deftest legu-test-dired-directory-cells-scoped-to-a-subtree ()
+  ;; Only the subtree on screen is summed, and never a partial ancestor.
+  (let* ((rows (legu-test--rows '(("src/a.el" 100 72 3)
+                                  ("src/core/b.el" 50 0 0)
+                                  ("src-x/c.el" 10 10 0)
+                                  ("README.md" 10 10 0))))
+         (cells (legu-dired--directory-cells rows "src" #'ignore)))
+    (should (equal (legu-test--cell (gethash "src" cells)) '(150 72 3 nil)))
+    (should (equal (legu-test--cell (gethash "src/core" cells)) '(50 0 0 nil)))
+    (should-not (gethash "" cells))
+    (should-not (gethash "src-x" cells))))
+
+(defun legu-test--faces (s)
+  "The (CHAR . FACE) pairs of S, for characters that carry a face."
+  (let (out)
+    (dotimes (i (length s))
+      (when-let* ((face (get-text-property i 'face s)))
+        (push (cons (aref s i) face) out)))
+    (nreverse out)))
+
+(ert-deftest legu-test-dired-cell-shows-floor-reviewed-and-ceiling-stale ()
+  ;; 729 of 1000 is 72.9%: floor.  21 of 1000 is 2.1%: ceiling.  Both
+  ;; rounding errors point at remaining work.
+  (should (equal (substring-no-properties
+                  (legu-dired--format-cell (list :total 1000 :reviewed 729 :stale 21)))
+                 "72% 3%  "))
+  ;; A zero stale count is blank, not "0%".
+  (should (equal (substring-no-properties
+                  (legu-dired--format-cell (list :total 100 :reviewed 100 :stale 0)))
+                 "100%    "))
+  (should (equal (substring-no-properties
+                  (legu-dired--format-cell (list :total 100 :reviewed 0 :stale 0)))
+                 "0%      "))
+  ;; Every cell is the same width.
+  (dolist (cell (list nil
+                      (list :total 0 :reviewed 0 :stale 0)
+                      (list :total 3 :reviewed 1 :stale 1 :uncertain t)
+                      (list :total 100 :reviewed 0 :stale 100 :uncertain t)))
+    (should (= (length (legu-dired--format-cell cell)) legu-dired--column-width))))
+
+(ert-deftest legu-test-dired-cell-marks-what-the-snapshot-cannot-vouch-for ()
+  (should (equal (substring-no-properties
+                  (legu-dired--format-cell
+                   (list :total 100 :reviewed 72 :stale 3 :uncertain t)))
+                 "72% 3%? ")))
+
+(ert-deftest legu-test-dired-cell-is-a-dash-when-nothing-counts ()
+  (should (equal (substring-no-properties (legu-dired--format-cell nil)) "—       "))
+  ;; An opaque or empty file has no lines to weigh.
+  (should (equal (substring-no-properties
+                  (legu-dired--format-cell (list :total 0 :reviewed 0 :stale 0)))
+                 "—       ")))
+
+(ert-deftest legu-test-dired-cell-faces ()
+  ;; Reviewed is the default face; stale is legu-stale; ? and — are dimmed.
+  (should (equal (legu-test--faces
+                  (legu-dired--format-cell (list :total 100 :reviewed 72 :stale 3 :uncertain t)))
+                 '((?3 . legu-stale) (?% . legu-stale) (?? . legu-unverified))))
+  (should (equal (legu-test--faces (legu-dired--format-cell nil))
+                 '((?— . legu-ignored))))
+  (should-not (legu-test--faces (legu-dired--format-cell (list :total 100 :reviewed 72 :stale 0)))))
+
+(defmacro legu-test--with-dired-tree (root-var &rest body)
+  "Run BODY in a dired buffer over a scratch tree bound to ROOT-VAR.
+The tree has a .review store, src/a.el and src/core/b.el, README.md,
+docs/x.md (ineligible) and an empty dir.  The snapshot is hand-built
+and has rows for everything but docs/x.md."
+  (declare (indent 1))
+  `(let* ((,root-var (file-name-as-directory
+                      (make-temp-file "legu-dired" t)))
+          (legu--snapshots (make-hash-table :test #'equal))
+          (legu--seen-roots nil)
+          (legu--watchers (make-hash-table :test #'equal))
+          (legu-watch-store nil)
+          (legu--root-cheap-cache (make-hash-table :test #'equal)))
+     (unwind-protect
+         (progn
+           (dolist (d '(".review" "src/core" "docs" "empty"))
+             (make-directory (expand-file-name d ,root-var) t))
+           (dolist (f '("src/a.el" "src/core/b.el" "README.md" "docs/x.md"))
+             (write-region "x\n" nil (expand-file-name f ,root-var)))
+           (puthash ,root-var
+                    (list :state 'fresh
+                          :started (time-add (current-time) 60)
+                          :rows (legu-test--rows '(("src/a.el" 100 72 3)
+                                                   ("src/core/b.el" 50 0 0)
+                                                   ("README.md" 10 10 0))))
+                    legu--snapshots)
+           (with-current-buffer (dired-noselect ,root-var)
+             (unwind-protect (progn ,@body)
+               (kill-buffer))))
+       (delete-directory ,root-var t))))
+
+(defun legu-test--dired-goto (file)
+  "Move to FILE's line; `dired-goto-file' does not know `.' and `..'."
+  (if (member file '("." ".."))
+      (progn
+        (goto-char (point-min))
+        (while (not (equal (dired-get-filename 'no-dir t) file))
+          (should (zerop (forward-line 1)))
+          (should-not (eobp))))
+    (should (dired-goto-file (expand-file-name file default-directory))))
+  (dired-move-to-filename))
+
+(defun legu-test--dired-column (file)
+  "The column text drawn before FILE in this dired buffer, or nil."
+  (save-excursion
+    (legu-test--dired-goto file)
+    (when-let* ((ov (seq-find (lambda (o) (overlay-get o 'legu-dired))
+                              (overlays-at (point)))))
+      (substring-no-properties (overlay-get ov 'before-string)))))
+
+(ert-deftest legu-test-dired-column-renders-from-the-snapshot ()
+  (legu-test--with-dired-tree root
+    (legu-dired-mode 1)
+    (should (equal (legu-test--dired-column "src") "48% 2%   "))
+    (should (equal (legu-test--dired-column "README.md") "100%     "))
+    ;; A directory with no eligible file beneath it, and an ineligible file.
+    (should (equal (legu-test--dired-column "docs") "—        "))
+    (should (equal (legu-test--dired-column "empty") "—        "))
+    ;; An inserted subdirectory gets the column too.
+    (dired-insert-subdir (expand-file-name "src" root))
+    (should (equal (legu-test--dired-column "src/a.el") "72% 3%   "))
+    (should (equal (legu-test--dired-column "src/core") "0%       "))
+    (dired-goto-subdir (expand-file-name "docs" root))
+    ;; The column survives hiding the details.
+    (dired-hide-details-mode 1)
+    (should (equal (legu-test--dired-column "README.md") "100%     "))
+    ;; And leaves nothing behind.
+    (legu-dired-mode -1)
+    (should-not (legu-test--dired-column "src"))))
+
+(ert-deftest legu-test-dired-column-in-a-subdirectory-sums-only-what-is-listed ()
+  (legu-test--with-dired-tree root
+    (with-current-buffer (dired-noselect (expand-file-name "src" root))
+      (unwind-protect
+          (progn
+            (legu-dired-mode 1)
+            (should (equal (legu-test--dired-column "a.el") "72% 3%   "))
+            (should (equal (legu-test--dired-column "core") "0%       "))
+            ;; `.' is this directory; `..' lies above what was summed, and
+            ;; a dash there would claim the parent has nothing to review.
+            (should (equal (legu-test--dired-column ".") "48% 2%   "))
+            (should-not (legu-test--dired-column "..")))
+        (kill-buffer)))))
+
+(ert-deftest legu-test-dired-column-inherits-the-question-mark ()
+  (legu-test--with-dired-tree root
+    ;; b.el is newer than the snapshot: its numbers, and those of every
+    ;; directory above it, carry a ?.
+    (set-file-times (expand-file-name "src/core/b.el" root)
+                    (time-add (current-time) 120))
+    (legu-dired-mode 1)
+    (should (equal (legu-test--dired-column "src") "48% 2%?  "))
+    (should (equal (legu-test--dired-column "README.md") "100%     "))
+    (dired-insert-subdir (expand-file-name "src" root))
+    (should (equal (legu-test--dired-column "src/a.el") "72% 3%   "))
+    (should (equal (legu-test--dired-column "src/core") "0%?      "))))
+
+(ert-deftest legu-test-dired-column-is-blank-until-a-snapshot-lands ()
+  (legu-test--with-dired-tree root
+    (let ((snapshot (gethash root legu--snapshots)))
+      (remhash root legu--snapshots)
+      (legu-dired-mode 1)
+      ;; Blank, and a snapshot has been asked for.
+      (should-not (legu-test--dired-column "src"))
+      (should (member root legu--seen-roots))
+      ;; It lands: the column appears without a revert.
+      (puthash root snapshot legu--snapshots)
+      (legu-dired-refresh-buffers root)
+      (should (equal (legu-test--dired-column "src") "48% 2%   ")))))
+
+(ert-deftest legu-test-dired-column-follows-global-legu-mode ()
+  (legu-test--with-dired-tree root
+    (let ((global-legu-mode t))
+      (let ((legu-dired-column nil))
+        (legu--turn-on-maybe)
+        (should-not legu-dired-mode))
+      (legu--turn-on-maybe)
+      (should legu-dired-mode)
+      (should (equal (legu-test--dired-column "src") "48% 2%   "))
+      ;; Turning the global mode off takes the column with it.
+      (let ((global-legu-mode nil))
+        (run-hooks 'global-legu-mode-hook))
+      (should-not legu-dired-mode))))
+
 
 (provide 'legu-tests)
 ;;; legu-tests.el ends here

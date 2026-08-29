@@ -94,9 +94,11 @@ count.
 _Avoid_: in scope, included, countable
 
 **Coverage**:
-Three numbers over eligible lines — unreviewed, reviewed, stale. Never a single
-percentage: the stale count says whether the reader is gaining ground or the
-codebase is outrunning them.
+Three numbers over eligible lines — unreviewed, reviewed, stale — for the
+repository, a directory, or one file. Never a single percentage: the stale
+count says whether the reader is gaining ground or the codebase is outrunning
+them. Where space is short, reviewed and stale are shown and unreviewed is the
+remainder.
 _Avoid_: progress, completion, score
 
 ### Storage
