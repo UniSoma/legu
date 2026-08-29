@@ -497,9 +497,9 @@
          (= (:end region) (:end res)))))
 
 (defn- superseded?
-  "Is this record made obsolete by a mark of `region`? Exactly the same place,
-   or a whole-file mark, or a record whose file no longer has the shape it was
-   recorded with."
+  "Is this ticket reference made obsolete by anchoring at `region`? Exactly the
+   same place, or a whole-file anchor, or a record whose file no longer has the
+   shape it was recorded with."
   [region record]
   (or (same-region? region record)
       (and (nil? (:start region))
@@ -508,16 +508,30 @@
            (:start region)
            (= (:path region) (:path (resolve-region record))))))
 
+(defn- contained?
+  "Is this review record made obsolete by a mark of `region`? Its current
+   anchor lies fully inside the mark (ADR-0013). A mark of the whole file
+   contains everything in it, and is the only mark that contains a record with
+   no line range."
+  [{:keys [whole?] :as region} record]
+  (let [res (resolve-region record)]
+    (and (not= :missing (:state res))
+         (= (:path region) (:path res))
+         (or whole?
+             (and (:start res)
+                  (<= (:start region) (:start res))
+                  (<= (:end res) (:end region)))))))
+
 (defn- purge!
-  "Drop every stored record that currently resolves onto `region`, wherever its
-   sidecar lives — a region re-reviewed after a rename must leave no ghost.
-   Returns the ticket references those records carried."
-  [region kind extra-pred]
+  "Drop every stored record that `obsolete?` says `region` makes obsolete,
+   wherever its sidecar lives — a region re-reviewed after a rename must leave
+   no ghost. Returns the ticket references those records carried."
+  [region kind obsolete?]
   (let [carried (atom [])]
     (doseq [sidecar (stored-paths)
             :let [state (load-state sidecar)
                   keep? (fn [r]
-                          (if (and (extra-pred r) (superseded? region (assoc r :path sidecar)))
+                          (if (obsolete? region (assoc r :path sidecar))
                             (do (swap! carried into (:notes r)) false)
                             true))
                   pruned (update state kind #(vec (filter keep? %)))]
@@ -528,7 +542,9 @@
 (defn cmd-mark [{:keys [args opts]}]
   (when-not (first args) (die "mark needs a path"))
   (let [{:keys [path start end opaque cur]} (region-of (first args))
-        carried (purge! {:path path :start start :end end} :regions (constantly true))
+        whole? (or opaque (and (= 1 start) (= end (count (:lines cur)))))
+        carried (purge! {:path path :start start :end end :whole? whole?}
+                        :regions contained?)
         state (load-state path)
         record (cond-> {:start start :end end
                         :commit (or (head-sha) "-")
@@ -558,7 +574,8 @@
     (when-not t (die "note needs a path"))
     (when (str/blank? ticket) (die "note needs a ticket id"))
     (let [{:keys [path start end opaque cur]} (region-of t)]
-      (purge! {:path path :start start :end end} :notes #(= ticket (:ticket %)))
+      (purge! {:path path :start start :end end} :notes
+              (fn [region r] (and (= ticket (:ticket r)) (superseded? region r))))
       (let [state (load-state path)
             note (cond-> {:start start :end end
                           :ticket ticket

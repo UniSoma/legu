@@ -46,7 +46,11 @@ rather than a silently swallowed argument:
 A review record stores the region's line range, the SHA of HEAD at review time,
 a hash of the whole file, and a hash of the region's *normalized* content — each
 line stripped of leading and trailing whitespace, and nothing more aggressive
-than that.
+than that. A mark also retires every earlier record that now anchors fully
+inside the marked range, so re-reading a stale region at the range it now
+anchors to leaves one record, not two. A record the mark only partly covers stays: the
+part outside was not re-read
+([ADR-0013](docs/adr/0013-a-mark-supersedes-only-what-it-contains.md)).
 
 To decide a region's current state, legu:
 
@@ -147,11 +151,9 @@ tool, and the alternatives they rejected, are one paragraph each under
 
 ## Known limits
 
-- Regions marked at overlapping ranges are counted once per line, but they are
-  separate records; `stale` reports each.
-- `mark` supersedes a record only when it resolves to exactly the same place. A
-  record whose projection drifted to a neighbouring range survives as its own
-  region — re-mark the range `stale` prints, or `legu forget` it.
+- A region only partly covered by a later mark survives as its own record;
+  lines are counted once, but `stale` names the old record's whole range until
+  it is re-marked in full or forgotten.
 - Content moved between two files that both still exist is stale, not followed.
 - A binary file that is renamed *and* rewritten reports `missing`: git has no
   similarity left to match on, so neither has legu.

@@ -77,13 +77,14 @@ carried by a rename. Moved is not stale.
 _Avoid_: shifted, relocated, drifted
 
 **Supersede**:
-What a mark does to every record that anchors to exactly the same place:
-replaces it.
+What a mark does to every review record that anchors fully inside the marked
+region: retires it. A record that reaches outside the mark is left in place;
+the part outside was not re-read.
 _Avoid_: overwrite, merge, dedupe
 
 **Ghost**:
-A review record that a re-review left behind because it anchored to a
-slightly different range from the one marked.
+A review record that a re-review left behind because it anchored partly
+outside the range marked.
 _Avoid_: duplicate, stray, orphan
 
 ### Coverage

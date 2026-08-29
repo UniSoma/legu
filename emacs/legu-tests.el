@@ -820,8 +820,7 @@ FILES is a list of (RELPATH . CONTENT).  Skips unless legu is installed."
       (unwind-protect
           (with-current-buffer buffer
             (legu-mode 1)
-            ;; Re-mark the range `legu stale' prints -- the CLI supersedes a
-            ;; record only where it currently sits.
+            ;; Re-mark the range `legu stale' prints.
             (let* ((entry (car (alist-get 'stale
                                           (legu--parse-json
                                            (nth 1 (legu-test--legu "stale" "--json"))))))
@@ -836,6 +835,80 @@ FILES is a list of (RELPATH . CONTENT).  Skips unless legu is installed."
             (let ((records (plist-get (legu-sidecar-records root "a.txt") :regions)))
               (should (= 1 (length records)))))
         (kill-buffer buffer)))))
+
+(defun legu-test--push-a-txt-down-and-change-it (root)
+  "Push the 10-20 region of a.txt down a line and change a line inside it.
+The record then anchors, stale, at 11-21."
+  (with-temp-file (expand-file-name "a.txt" root)
+    (insert (concat (legu-test--lines 40) "\n"))
+    (goto-char (point-min)) (forward-line 2) (insert "above\n")
+    (goto-char (point-min)) (forward-line 15) (insert "changed\n")))
+
+(defun legu-test--stale-regions (_root)
+  "What `legu stale --json' reports for the repository at `default-directory'."
+  (alist-get 'stale (legu--parse-json (nth 1 (legu-test--legu "stale" "--json")))))
+
+(ert-deftest legu-test-integration-a-containing-mark-supersedes-a-record-anchored-elsewhere ()
+  ;; A stale record that now anchors at another range used to survive any
+  ;; mark but one on exactly that range, and sat in `legu stale' until
+  ;; forgotten.
+  (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 40) "\n")))
+    (legu-test--legu "mark" "a.txt:10-20")
+    (legu-test--push-a-txt-down-and-change-it root)
+    (let ((region (car (legu-test--stale-regions root))))
+      (should (= 11 (alist-get 'start region)))
+      (should (= 21 (alist-get 'end region))))
+    (legu-test--legu "mark" "a.txt:10-22")
+    (should (null (legu-test--stale-regions root)))
+    (should (= 1 (length (plist-get (legu-sidecar-records root "a.txt") :regions))))))
+
+(ert-deftest legu-test-integration-a-partial-re-read-leaves-the-old-record ()
+  ;; A partly re-read region is not a read region: the old record stays and
+  ;; `legu stale' keeps naming its whole range.
+  (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 40) "\n")))
+    (legu-test--legu "mark" "a.txt:10-20")
+    (legu-test--push-a-txt-down-and-change-it root)
+    (legu-test--legu "mark" "a.txt:11-15")
+    (let ((region (car (legu-test--stale-regions root))))
+      (should (= 11 (alist-get 'start region)))
+      (should (= 21 (alist-get 'end region))))
+    (should (= 2 (length (plist-get (legu-sidecar-records root "a.txt") :regions))))))
+
+(ert-deftest legu-test-integration-a-whole-file-mark-supersedes-a-record-anchored-elsewhere ()
+  ;; `legu mark a.txt' on a text file is a 1-N range, not an opaque region, and
+  ;; used to retire nothing.
+  (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 40) "\n")))
+    (legu-test--legu "mark" "a.txt:10-20")
+    (legu-test--push-a-txt-down-and-change-it root)
+    (legu-test--legu "mark" "a.txt")
+    (should (null (legu-test--stale-regions root)))
+    (should (= 1 (length (plist-get (legu-sidecar-records root "a.txt") :regions))))))
+
+(ert-deftest legu-test-integration-a-containing-mark-leaves-ticket-references-alone ()
+  ;; Ticket references are independent anchors, not fields of the retired
+  ;; record.
+  (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 40) "\n")))
+    (legu-test--legu "mark" "a.txt:10-20")
+    (legu-test--legu "note" "a.txt:12-14" "T-1")
+    (legu-test--push-a-txt-down-and-change-it root)
+    (legu-test--legu "mark" "a.txt:10-22")
+    (let ((records (legu-sidecar-records root "a.txt")))
+      (should (= 1 (length (plist-get records :regions))))
+      (should (= 1 (length (plist-get records :notes)))))))
+
+(ert-deftest legu-test-integration-an-opaque-record-outlives-a-range-mark ()
+  ;; A record for a once-empty file is retired by a mark of the whole file it
+  ;; became, never by a mark of part of it.
+  (legu-test--with-repo (list (cons "e.txt" ""))
+    (legu-test--legu "mark" "e.txt")
+    (with-temp-file (expand-file-name "e.txt" root)
+      (insert (concat (legu-test--lines 40) "\n")))
+    (legu-test--legu "mark" "e.txt:10-20")
+    (should (= 1 (length (legu-test--stale-regions root))))
+    (should (= 2 (length (plist-get (legu-sidecar-records root "e.txt") :regions))))
+    (legu-test--legu "mark" "e.txt:1-40")
+    (should (null (legu-test--stale-regions root)))
+    (should (= 1 (length (plist-get (legu-sidecar-records root "e.txt") :regions))))))
 
 (ert-deftest legu-test-integration-typing-during-a-mark-keeps-the-alarm-up ()
   ;; The write callback used to clear the unverified flag unconditionally,
