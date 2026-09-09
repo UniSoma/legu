@@ -659,6 +659,24 @@
     (str "…" (subs path (- (count path) (dec width))))
     path))
 
+(defn path-column
+  "How wide a column of PATHS wants to be: the longest of them, never so wide
+   that one deep path pushes the numbers off the grid."
+  [paths]
+  (min 60 (max 20 (apply max 0 (map count paths)))))
+
+(defn num-column
+  "How wide a column of counts wants to be: its widest number, and never
+   narrower than the longest heading one of these columns carries."
+  [ns]
+  (max (count "UNREAD") (count (str (apply max 0 ns)))))
+
+(defn cell
+  "N in a column WIDTH wide, painted CODE unless it is a zero, which is dim
+   whatever the column means."
+  [n width code]
+  (paint (if (zero? n) :dim code) (format (str "%" width "d") n)))
+
 ;; ---------------------------------------------------------------- commands
 
 (defn region-of
@@ -990,11 +1008,9 @@
                                  " read in full"
                                  (when (pos? hidden) " (hidden)")))))
   (when (seq files)
-    (let [longest (apply max 0 (map (comp count :path) files))
-          path-width (min 60 (max 20 longest))
-          digits (max 5 (count (str (apply max 0 (map :total files)))))
-          num (fn [n] (format (str "%" digits "d") n))
-          cell (fn [n code] (paint (if (zero? n) :dim code) (num n)))]
+    (let [path-width (path-column (map :path files))
+          digits (num-column (map :total files))
+          num (fn [n] (format (str "%" digits "d") n))]
       (println (paint :dim (str "  " (format (str "%-" path-width "s") "PATH")
                                 "  " (format (str "%" digits "s") "READ")
                                 "  " (format (str "%" digits "s") "STALE")
@@ -1003,9 +1019,9 @@
                                 "  READ RANGES")))
       (doseq [f files]
         (println (str "  " (format (str "%-" path-width "s") (shorten-path (:path f) path-width))
-                      "  " (cell (:reviewed f) :green)
-                      "  " (cell (:stale f) :yellow)
-                      "  " (cell (:unreviewed f) nil)
+                      "  " (cell (:reviewed f) digits :green)
+                      "  " (cell (:stale f) digits :yellow)
+                      "  " (cell (:unreviewed f) digits nil)
                       "  " (num (:total f))
                       "  " (cond (:read-in-full f) (paint :dim "read in full")
                                  (empty? (:reviewed-lines f)) (paint :dim "none")
@@ -1100,6 +1116,35 @@
           {}
           (commit-file-sets)))
 
+(defn render-queue
+  "The queue: what to read next, and under which question. The heading says
+   how much of the queue is on screen, so a --limit never reads as the end
+   of the work."
+  [files total cochange?]
+  (println)
+  (println (str (paint :bold "QUEUE") "  "
+                (paint :dim (str (when (> total (count files))
+                                   (str (count files) " of "))
+                                 total (if (= 1 total) " file" " files")
+                                 " with gaps · "
+                                 (if cochange?
+                                   "co-change with what you have reviewed"
+                                   "directory order")))))
+  (let [path-width (path-column (map :path files))
+        digits (num-column (map #(+ (:unreviewed %) (:stale %)) files))]
+    (println (paint :dim (str "  " (format (str "%-" path-width "s") "PATH")
+                              "  " (format (str "%" digits "s") "UNREAD")
+                              "  " (format (str "%" digits "s") "STALE")
+                              "  TO READ")))
+    (doseq [f files]
+      (println (str "  " (format (str "%-" path-width "s")
+                                 (shorten-path (:path f) path-width))
+                    "  " (cell (:unreviewed f) digits nil)
+                    "  " (cell (:stale f) digits :yellow)
+                    "  " (if (= (count (:todo f)) (:total f))
+                           (paint :dim "whole file")
+                           (fmt-ranges (:todo f))))))))
+
 (defn cmd-next [{:keys [opts]}]
   (let [cochange? (= "cochange" (:order opts))]
     (when (and cochange? (not *git?*))
@@ -1112,10 +1157,11 @@
           rank (fn [f] [(- (get scores (:path f) 0))
                         (str (fs/parent (fs/path (:path f))))
                         (:path f)])
-          gaps (->> (eligible-files)
-                    (map #(file-coverage by-path %))
-                    (filter #(pos? (+ (:unreviewed %) (:stale %))))
-                    (sort-by rank)
+          with-gaps (->> (eligible-files)
+                         (map #(file-coverage by-path %))
+                         (filter #(pos? (+ (:unreviewed %) (:stale %))))
+                         (sort-by rank))
+          gaps (->> with-gaps
                     (take limit)
                     (mapv (fn [f]
                             (assoc f :todo (into (sorted-set)
@@ -1129,10 +1175,7 @@
             (fn [_]
               (if (empty? gaps)
                 (println "everything is reviewed and current")
-                (doseq [f gaps]
-                  (println (format "%-52s %5d unread %5d stale  %s"
-                                   (:path f) (:unreviewed f) (:stale f)
-                                   (fmt-ranges (:todo f)))))))))))
+                (render-queue gaps (count with-gaps) cochange?)))))))
 
 (defn cmd-coverage [{:keys [opts]}]
   (let [by-path (resolved-by-path)
@@ -1140,16 +1183,15 @@
         total (reduce + 0 (map :total files))
         rev (reduce + 0 (map :reviewed files))
         stl (reduce + 0 (map :stale files))
-        unr (- total rev stl)
-        pct #(if (zero? total) 0.0 (* 100.0 (/ (double %) total)))]
+        unr (- total rev stl)]
     (emit opts {:eligible-files (count files) :eligible-lines total
                 :never-read unr :reviewed rev :stale stl}
           (fn [_]
-            (println (format "eligible files   %7d" (count files)))
-            (println (format "eligible lines   %7d" total))
-            (println (format "never read       %7d  %5.1f%%" unr (pct unr)))
-            (println (format "reviewed current %7d  %5.1f%%" rev (pct rev)))
-            (println (format "reviewed stale   %7d  %5.1f%%" stl (pct stl)))))))
+            (if (empty? files)
+              (println "no eligible files")
+              (render-coverage {:files (count files) :lines total
+                                :unreviewed unr :reviewed rev :stale stl}
+                               nil))))))
 
 ;; ---------------------------------------------------------------- cli
 

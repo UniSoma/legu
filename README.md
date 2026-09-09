@@ -110,8 +110,11 @@ HEAD, so an uncommitted edit shows up as stale immediately.
 
 ## What to read next
 
-`legu next` lists the files with something left to read. The two orderings
-answer different questions, and the default is `dir`:
+`legu next` lists the files with something left to read: a heading saying how
+many of them are on screen, how many have gaps and which order they are in,
+then one row per file with its unread and stale line counts and the lines left
+to read. The two orderings answer different questions, and the default is
+`dir`:
 
 ```
 legu next                    # same as --order dir
@@ -280,7 +283,9 @@ file hash alone.
 
 ## Eligibility
 
-`legu coverage` counts every tracked file except those matching `.reviewignore`
+`legu coverage` prints the three numbers over eligible lines — never read,
+read, stale — as three rows on one bar scale, which is the block `legu status`
+opens with. It counts every tracked file except those matching `.reviewignore`
 at the repo root — vendored code, generated files, lockfiles, fixtures.
 `.reviewignore` uses gitignore syntax, and git itself does the matching, so
 negations and directory patterns behave exactly as you expect.
