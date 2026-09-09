@@ -1690,7 +1690,7 @@ timestamp, commit and hashes default to any well-formed value."
                   (seq-find (lambda (f) (equal path (alist-get 'path f)))
                             (alist-get 'files status)))))
       (should (= 1 (alist-get 'reviewed (funcall row "binary.dat"))))
-      (should (= 0 (alist-get 'unreviewed (funcall row "empty.txt"))))
+      (should (= 1 (alist-get 'reviewed (funcall row "empty.txt"))))
       (should (= 11 (alist-get 'reviewed (funcall row "moved.txt"))))
       (should (= 11 (alist-get 'stale (funcall row "stale.txt"))))
       (should (= 6 (length (alist-get 'tickets status)))))
@@ -1701,6 +1701,24 @@ timestamp, commit and hashes default to any well-formed value."
         (should (string-match-p "forgot 2 records" (nth 1 result))))
       (should-not (legu-test--sidecar-text root path)))
     (should (null (legu-test--stale-regions root)))))
+
+(ert-deftest legu-test-integration-an-empty-file-is-one-line-to-read ()
+  ;; CONTEXT.md: an opaque region counts as one line. It used to count as
+  ;; none, so an empty file never entered the numbers or the queue.
+  (legu-test--with-repo (list (cons "empty.txt" "")
+                              (cons "a.txt" "one\n"))
+    (let ((coverage (legu--parse-json (nth 1 (legu-test--legu "coverage" "--json"))))
+          (next (legu--parse-json (nth 1 (legu-test--legu "next" "--json")))))
+      (should (= 2 (alist-get 'eligible-lines coverage)))
+      (should (= 2 (alist-get 'never-read coverage)))
+      (should (member "empty.txt" (mapcar (lambda (f) (alist-get 'path f))
+                                          (alist-get 'next next)))))
+    (legu-test--legu "mark" "empty.txt")
+    (let ((coverage (legu--parse-json (nth 1 (legu-test--legu "coverage" "--json"))))
+          (next (legu--parse-json (nth 1 (legu-test--legu "next" "--json")))))
+      (should (= 1 (alist-get 'reviewed coverage)))
+      (should (equal '("a.txt") (mapcar (lambda (f) (alist-get 'path f))
+                                        (alist-get 'next next)))))))
 
 (ert-deftest legu-test-integration-emacs-and-the-cli-agree-on-review-evidence ()
   (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 30) "\n"))

@@ -472,7 +472,8 @@
   (set (keys @store-errors)))
 
 (defn eligible-files
-  "Files whose lines count toward coverage, with their line counts."
+  "Files whose lines count toward coverage, with their line counts. An empty
+   file is one opaque region, and counts as one line like a binary does."
   []
   (let [ignored (ignored-files)
         skipped (skipped-paths)
@@ -483,10 +484,11 @@
                           (not (str/starts-with? p ".review/"))
                           (not= p ".reviewignore"))]
            (let [c (read-worktree p)]
+             ;; an opaque region is one line to read, whether binary or empty
              {:path p
               :binary (= :binary (:kind c))
               :lines (case (:kind c)
-                       :text (count (:lines c))
+                       :text (max 1 (count (:lines c)))
                        :binary 1
                        0)})))))
 

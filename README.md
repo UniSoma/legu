@@ -232,7 +232,8 @@ at the repo root — vendored code, generated files, lockfiles, fixtures.
 `.reviewignore` uses gitignore syntax, and git itself does the matching, so
 negations and directory patterns behave exactly as you expect.
 
-Binary files (detected by a NUL byte in the first 8 KB) count as one line.
+Binary files (detected by a NUL byte in the first 8 KB) and empty files count
+as one line each.
 
 ## Ticket references, not prose
 
