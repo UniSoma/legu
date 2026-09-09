@@ -1,6 +1,6 @@
 #!/usr/bin/env bb
 ;; legu — human review coverage for a codebase.
-;; Depends on babashka and git. Nothing else.
+;; Depends on babashka 1.13.220 or newer and git. Nothing else.
 
 (ns legu.main
   (:require [babashka.fs :as fs]
@@ -30,9 +30,39 @@
 
 (def VERSION "0.4.1")
 
+;; legu is moving its argument parsing onto the babashka.cli bundled with
+;; babashka, whose option spec and generated help arrived in this release. The
+;; floor lands ahead of that move so a reader on an older babashka meets this
+;; message rather than a resolution error naming a library they never chose to
+;; depend on.
+(def MIN-BABASHKA "1.13.220")
+
 (defn die [msg]
   (binding [*out* *err*] (println (str "legu: " msg)))
   (System/exit 1))
+
+(defn- version-numbers
+  "The dotted components of a version string as longs, or nil when any of them
+   is not a number."
+  [v]
+  (let [parts (map parse-long (str/split (str v) #"\."))]
+    (when (every? some? parts) (vec parts))))
+
+(defn babashka-too-old
+  "The message for a babashka older than floor, or nil when it is new enough.
+   Components are compared as numbers, so 1.13.9 is older than 1.13.220. A
+   version string that does not split into numbers, such as a dev build, counts
+   as new enough: refusing to run on a version legu cannot read would cost more
+   than the check saves."
+  [running floor]
+  (let [found (version-numbers running)
+        want (version-numbers floor)]
+    (when (and found want)
+      (let [width (max (count found) (count want))
+            pad #(vec (take width (concat % (repeat 0))))]
+        (when (neg? (compare (pad found) (pad want)))
+          (str "needs babashka " floor " or newer, but found " running
+               "; install a newer babashka from https://babashka.org"))))))
 
 ;; ---------------------------------------------------------------- git
 
@@ -1279,6 +1309,8 @@
           :else (recur (fs/parent d))))))
 
 (defn -main [& argv]
+  (when-let [message (babashka-too-old (System/getProperty "babashka.version") MIN-BABASHKA)]
+    (die message))
   (binding [*root* (find-root)
             *git?* (some? (git-toplevel))]
     (let [{:keys [opts args]} (parse-args argv)
@@ -1300,4 +1332,9 @@
 
         :else (die (str "unknown command: " cmd))))))
 
-(apply -main *command-line-args*)
+;; The CLI suite loads this file to call the version comparison directly: no
+;; subprocess can reach it, since that would need a babashka installed at each
+;; version being compared. Without the guard a load takes over the process and
+;; runs the command line instead.
+(when (= *file* (System/getProperty "babashka.file"))
+  (apply -main *command-line-args*))

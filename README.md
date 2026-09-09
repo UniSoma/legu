@@ -12,7 +12,7 @@ scripts and SQL migrations.
 
 ## Requirements
 
-babashka and git. Nothing else.
+babashka 1.13.220 or newer, and git. Nothing else.
 
 ## Install
 
@@ -315,6 +315,20 @@ git's, not ours.
 The vocabulary is in [CONTEXT.md](CONTEXT.md); the decisions that shaped the
 tool, and the alternatives they rejected, are one paragraph each under
 [docs/adr/](docs/adr/).
+
+## Tests
+
+```
+bb test/cli_test.clj
+```
+
+The CLI suite records what `legu` does with a command line: how each option is
+parsed and where it may appear, how many arguments each command takes, and the
+exit code and message behind every error. It needs babashka and git, builds its
+own scratch repositories, and exits non-zero when any assertion fails.
+
+The Emacs package has its own ERT suite, documented under
+[emacs/README.md](emacs/README.md#tests).
 
 ## Known limits
 

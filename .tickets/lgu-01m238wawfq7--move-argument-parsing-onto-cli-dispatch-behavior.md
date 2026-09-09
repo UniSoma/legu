@@ -6,7 +6,7 @@ type: task
 priority: 2
 mode: afk
 created: '2026-09-09T14:24:19.343421336Z'
-updated: '2026-09-09T14:24:59.757389052Z'
+updated: '2026-09-09T15:02:20.938153205Z'
 parent: lgu-01m238vjgnh6
 acceptance:
 - title: The usage string, flags table, commands table and parse-args loop are gone, replaced by one dispatch tree
@@ -19,14 +19,15 @@ acceptance:
   done: false
 - title: A bare legu prints help and exits 0; legu --version prints what it prints today, in both human and --json form
   done: false
-- title: The -- terminator, --json=false and --no-json behave as they do today
-  done: false
 - title: Every option legu accepts today is still accepted in the same position with the same effect; no option becomes an error in this ticket
   done: false
-- title: The Emacs test suite passes without changes to the tests
+- title: The -- terminator and --json=false behave as they do today; --no-json, which is an unknown-option error today, becomes accepted as {:json false} and the close summary records that as a deliberate addition
+  done: false
+- title: The Emacs test suite passes without changes to the tests, or the close summary records that no emacs was available and names the six emacs/legu.el sites that surface legu's stderr verbatim as checked by inspection instead
   done: false
 deps:
 - lgu-01m238vy775q
+- lgu-01m23a8m1t5c
 ---
 
 ## Description

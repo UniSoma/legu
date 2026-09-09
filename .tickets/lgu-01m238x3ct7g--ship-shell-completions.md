@@ -6,7 +6,7 @@ type: task
 priority: 2
 mode: afk
 created: '2026-09-09T14:24:44.442827205Z'
-updated: '2026-09-09T14:25:15.459818917Z'
+updated: '2026-09-09T14:48:45.740141748Z'
 parent: lgu-01m238vjgnh6
 acceptance:
 - title: legu org.babashka.cli/completions snippet --shell <shell> emits a working snippet for bash, zsh and fish
@@ -23,6 +23,7 @@ acceptance:
   done: false
 deps:
 - lgu-01m238wawfq7
+- lgu-01m238wskh6s
 ---
 
 ## Description
