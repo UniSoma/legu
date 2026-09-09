@@ -332,9 +332,9 @@
       (should (equal (substring-no-properties (legu--lighter)) " legu 61%▪3"))
       (setq-local legu--stale-count 0)
       (should (equal (substring-no-properties (legu--lighter)) " legu 61%"))
-      (setq-local legu--tier0-unresolved t)
+      (setq-local legu--unaccounted t)
       (should (equal (substring-no-properties (legu--lighter)) " legu 61%?"))
-      (setq-local legu--tier0-unresolved nil)
+      (setq-local legu--unaccounted nil)
       (setq-local legu--unverified t)
       (should (equal (substring-no-properties (legu--lighter)) " legu?"))
       (setq-local legu--unverified nil)
@@ -715,20 +715,6 @@ FILES is a list of (RELPATH . CONTENT).  Skips unless legu is installed."
     (let ((data (legu--parse-json (nth 1 (legu-test--legu "stale" "--json")))))
       (should (null (alist-get 'stale data))))))
 
-(ert-deftest legu-test-integration-rename-is-the-documented-tier0-blind-spot ()
-  ;; Asserts the limit, so a future fix breaks this test visibly.
-  (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 20) "\n")))
-    (legu-test--legu "mark" "a.txt:1-10")
-    (legu-test--git "mv" "a.txt" "b.txt")
-    (legu-test--git "commit" "-qam" "rename")
-    (should-not (plist-get (legu--tier0 root "b.txt" (expand-file-name "b.txt" root))
-                           :reviewed))
-    ;; The CLI still follows it, so the snapshot repairs the picture.
-    (legu-refresh-snapshot root)
-    (should (legu-test--wait (lambda () (plist-get (legu-snapshot root) :coverage))))
-    (let ((row (gethash "b.txt" (plist-get (legu-snapshot root) :rows))))
-      (should (equal (plist-get row :ranges) '((1 . 10)))))))
-
 (ert-deftest legu-test-integration-unsaved-buffer-is-refused ()
   (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 3) "\n")))
     (let ((buffer (find-file-noselect (expand-file-name "a.txt" root))))
@@ -973,6 +959,254 @@ FILES is a list of (RELPATH . CONTENT).  Skips unless legu is installed."
     (dolist (word '("mark" "ticket" "forget" "status" "regions" "stale" "next" "coverage"
                     "--json" "--reviewer" "--limit"))
       (should (string-match-p (regexp-quote word) (nth 1 result))))))
+
+
+;;;; The per-file regions query
+;;
+;; Tier 0.5: one `legu regions' for the file in front of you, when the
+;; sidecar at its current path cannot account for it and no trusted
+;; snapshot already has.
+
+(defconst legu-test--rename-answer "\
+{\"path\":\"b.txt\",\"eligible\":true,\"condition\":\"present\",\"total\":20,
+ \"opaque\":false,\"complete\":true,
+ \"regions\":[{\"start\":1,\"end\":10,\"state\":\"reviewed\",\"reason\":null,\"moved\":true,
+               \"original\":{\"path\":\"a.txt\",\"start\":1,\"end\":10}},
+              {\"start\":14,\"end\":16,\"state\":\"stale\",\"reason\":\"content changed\",
+               \"original\":{\"path\":\"a.txt\",\"start\":14,\"end\":16}},
+              {\"start\":null,\"end\":null,\"state\":\"missing\",\"reason\":\"file is gone\",
+               \"original\":{\"path\":\"a.txt\",\"start\":30,\"end\":31}}],
+ \"tickets\":[{\"start\":4,\"end\":6,\"ticket\":\"T-1\",\"state\":\"reviewed\"}]}"
+  "A per-file answer carrying one reviewed, one stale and one missing record.")
+
+(defmacro legu-test--with-file (lines &rest body)
+  "Run BODY in a buffer visiting a real file of LINES lines under `root'.
+`legu--root' and `legu--relpath' are set by hand, so nothing here needs
+git, the CLI or `legu-mode'."
+  (declare (indent 1))
+  `(let* ((root (file-name-as-directory (make-temp-file "legu-file" t)))
+          (file (expand-file-name "b.txt" root))
+          (legu--snapshots (make-hash-table :test #'equal)))
+     (with-temp-file file (insert (legu-test--lines ,lines) "\n"))
+     (let ((buffer (find-file-noselect file)))
+       (unwind-protect
+           (with-current-buffer buffer
+             (setq legu--root root legu--relpath "b.txt")
+             ,@body)
+         (with-current-buffer buffer (set-buffer-modified-p nil))
+         (kill-buffer buffer)
+         (delete-directory root t)))))
+
+(ert-deftest legu-test-per-file-answer-splits-reviewed-from-stale ()
+  (let ((parsed (legu--file-regions-parse
+                 (legu--parse-json legu-test--rename-answer))))
+    (should (equal (plist-get parsed :reviewed) '((1 . 10))))
+    (should (equal (plist-get parsed :stale) '((14 . 16))))
+    (should (equal (plist-get parsed :tickets) '(4)))
+    (should (plist-get parsed :complete))))
+
+(ert-deftest legu-test-per-file-answer-is-painted-under-the-sidecar ()
+  (legu-test--with-file 20
+    (let (callback)
+      (cl-letf (((symbol-function 'legu--run)
+                 (lambda (_root args cb)
+                   (should (equal args '("regions" "b.txt" "--json")))
+                   (setq callback cb))))
+        (legu--file-regions-query)
+        (funcall callback 'ok legu-test--rename-answer ""))
+      (let ((state (legu--compute)))
+        (should (equal (plist-get state :reviewed) '((1 . 10))))
+        (should (equal (plist-get state :stale) '((14 . 16))))
+        (should (equal (plist-get state :tickets) '(4))))
+      ;; The CLI vouched for the whole file, so nothing is left unverified.
+      (should-not legu--unaccounted))))
+
+(ert-deftest legu-test-per-file-answer-is-dropped-when-the-buffer-changed ()
+  (legu-test--with-file 20
+    (let (callback)
+      (cl-letf (((symbol-function 'legu--run)
+                 (lambda (_root _args cb) (setq callback cb))))
+        (legu--file-regions-query)
+        (goto-char (point-max))
+        (insert "one more line\n")
+        (funcall callback 'ok legu-test--rename-answer ""))
+      (should-not legu--file-regions))))
+
+(ert-deftest legu-test-per-file-answer-is-dropped-when-a-newer-one-overtakes-it ()
+  (legu-test--with-file 20
+    (let (callbacks)
+      (cl-letf (((symbol-function 'legu--run)
+                 (lambda (_root _args cb) (push cb callbacks))))
+        (legu--file-regions-query)
+        (legu--file-regions-query)
+        ;; The older request lands last and says nothing.
+        (funcall (cadr callbacks) 'ok legu-test--rename-answer "")
+        (should-not legu--file-regions)
+        (funcall (car callbacks) 'ok legu-test--rename-answer "")
+        (should (equal (plist-get legu--file-regions :reviewed) '((1 . 10))))))))
+
+(ert-deftest legu-test-per-file-answer-is-dropped-when-a-trusted-snapshot-overtakes-it ()
+  (legu-test--with-file 20
+    (let (callback)
+      (cl-letf (((symbol-function 'legu--run)
+                 (lambda (_root _args cb) (setq callback cb))))
+        (legu--file-regions-query)
+        (puthash root (list :state 'fresh
+                            :started (time-add (current-time) 60)
+                            :rows (make-hash-table :test #'equal))
+                 legu--snapshots)
+        (funcall callback 'ok legu-test--rename-answer ""))
+      (should-not legu--file-regions))))
+
+(ert-deftest legu-test-a-trusted-snapshot-outranks-the-per-file-answer ()
+  (legu-test--with-file 20
+    (let (callback)
+      (cl-letf (((symbol-function 'legu--run)
+                 (lambda (_root _args cb) (setq callback cb))))
+        (legu--file-regions-query)
+        (funcall callback 'ok legu-test--rename-answer ""))
+      (should (equal (plist-get (legu--compute) :stale) '((14 . 16))))
+      ;; The snapshot lands, and it no longer knows of any stale region here
+      ;; -- someone forgot it.  Its verdict is the later one, so the per-file
+      ;; answer must not put the stale range back.
+      (let ((rows (make-hash-table :test #'equal)))
+        (puthash "b.txt" (list :total 20 :reviewed 10 :stale 0 :unreviewed 10
+                               :ranges '((1 . 10)))
+                 rows)
+        (puthash root (list :state 'fresh
+                            :started (time-add (current-time) 60)
+                            :rows rows
+                            :eligible (let ((h (make-hash-table :test #'equal)))
+                                        (puthash "b.txt" t h) h)
+                            :stale (make-hash-table :test #'equal)
+                            :tickets (make-hash-table :test #'equal))
+                 legu--snapshots))
+      (let ((state (legu--compute)))
+        (should (equal (plist-get state :reviewed) '((1 . 10))))
+        (should-not (plist-get state :stale))
+        (should-not (plist-get state :tickets))))))
+
+(ert-deftest legu-test-a-snapshot-that-cannot-vouch-here-does-not-discard-the-answer ()
+  ;; The two tests have to agree.  Discarding the answer on mtime alone,
+  ;; while `legu--compute' paints from the stronger one, leaves a buffer
+  ;; showing nothing at all until the next save.
+  (legu-test--with-file 20
+    (let (callback)
+      (cl-letf (((symbol-function 'legu--run)
+                 (lambda (_root _args cb) (setq callback cb))))
+        (legu--file-regions-query)
+        ;; A snapshot newer than the request, so it outranks on timing, but
+        ;; older than a content change this buffer watched happen -- under a
+        ;; backdated mtime, so its own mtime check is fooled and the content
+        ;; memo is not.  It may not pronounce here, so it may not silence the
+        ;; answer either.
+        (set-file-times file (time-subtract (current-time) 86400))
+        (setq legu--content-seen (cons "aaa" (time-add (current-time) 60)))
+        (puthash root (list :state 'fresh
+                            :started (time-add (current-time) 30)
+                            :rows (make-hash-table :test #'equal))
+                 legu--snapshots)
+        (funcall callback 'ok legu-test--rename-answer ""))
+      (should (equal (plist-get legu--file-regions :reviewed) '((1 . 10)))))))
+
+(ert-deftest legu-test-per-file-answer-lapses-when-the-file-changes ()
+  (legu-test--with-file 20
+    (let (callback)
+      (cl-letf (((symbol-function 'legu--run)
+                 (lambda (_root _args cb) (setq callback cb))))
+        (legu--file-regions-query)
+        (funcall callback 'ok legu-test--rename-answer ""))
+      (should legu--file-regions)
+      (with-temp-file file (insert (legu-test--lines 21) "\n"))
+      (should-not (plist-get (legu--compute) :reviewed))
+      (should-not legu--file-regions))))
+
+(ert-deftest legu-test-incomplete-per-file-answer-keeps-the-unverified-indicator ()
+  (legu-test--with-file 20
+    (let (callback)
+      (cl-letf (((symbol-function 'legu--run)
+                 (lambda (_root _args cb) (setq callback cb))))
+        (legu--file-regions-query)
+        (funcall callback 'ok
+                 (string-replace "\"complete\":true" "\"complete\":false"
+                                 legu-test--rename-answer)
+                 ""))
+      ;; What was resolved is painted; the rest is still an open question.
+      (should (equal (plist-get (legu--compute) :reviewed) '((1 . 10))))
+      (should legu--unaccounted))))
+
+(ert-deftest legu-test-per-file-query-is-not-run-for-a-confirming-sidecar ()
+  (legu-test--with-file 20
+    (let ((sidecar (expand-file-name ".review/b.txt.edn" root)))
+      (make-directory (file-name-directory sidecar) t)
+      (with-temp-file sidecar
+        (insert (format "{:schema 1, :path \"b.txt\", :regions [{:start 1, :end 10,
+ :file-hash \"%s\"}], :tickets []}"
+                        (legu--file-hash file))))
+      (legu--compute)
+      (should-not legu--file-regions-wanted)
+      ;; Break one hash and the file is no longer accounted for locally.
+      (with-temp-file sidecar
+        (insert "{:schema 1, :path \"b.txt\", :regions [{:start 1, :end 10,
+ :file-hash \"deadbeef\"}], :tickets []}"))
+      (legu--compute)
+      (should legu--file-regions-wanted))))
+
+(ert-deftest legu-test-integration-rename-paints-before-any-snapshot ()
+  "The blind spot this package used to document, now closed."
+  (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 20) "\n")))
+    (legu-test--legu "mark" "a.txt:1-10")
+    (legu-test--git "mv" "a.txt" "b.txt")
+    (legu-test--git "commit" "-qam" "rename")
+    ;; The sidecar is still keyed by the old path, so tier 0 knows nothing.
+    (should-not (plist-get (legu--tier0 root "b.txt" (expand-file-name "b.txt" root))
+                           :reviewed))
+    (let* ((legu-snapshot-initial-delay 300)
+           (legu--seen-roots legu--seen-roots)
+           (buffer (find-file-noselect (expand-file-name "b.txt" root))))
+      (unwind-protect
+          (with-current-buffer buffer
+            (legu-mode 1)
+            (should (legu-test--wait
+                     (lambda () (plist-get legu--painted :reviewed))))
+            (should (equal (plist-get legu--painted :reviewed) '((1 . 10))))
+            ;; And no repository snapshot was needed to get there.
+            (should-not (legu-snapshot root)))
+        (kill-buffer buffer)))))
+
+(ert-deftest legu-test-integration-a-copy-inherits-nothing-through-the-painting-path ()
+  (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 20) "\n")))
+    (legu-test--legu "mark" "a.txt:1-10")
+    (copy-file (expand-file-name "a.txt" root) (expand-file-name "b.txt" root))
+    (legu-test--git "add" "-A")
+    (legu-test--git "commit" "-qm" "copy")
+    (let* ((legu-snapshot-initial-delay 300)
+           (legu--seen-roots legu--seen-roots)
+           (buffer (find-file-noselect (expand-file-name "b.txt" root))))
+      (unwind-protect
+          (with-current-buffer buffer
+            (legu-mode 1)
+            (should (legu-test--wait (lambda () legu--file-regions)))
+            (should-not (plist-get legu--painted :reviewed))
+            (should-not (plist-get legu--painted :stale)))
+        (kill-buffer buffer)))))
+
+(ert-deftest legu-test-integration-a-confirming-sidecar-runs-no-subprocess ()
+  (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 20) "\n")))
+    (legu-test--legu "mark" "a.txt")
+    (let* ((legu-snapshot-initial-delay 300)
+           (legu--seen-roots legu--seen-roots)
+           (ran nil)
+           (buffer nil))
+      (cl-letf (((symbol-function 'legu--run)
+                 (lambda (_root args _cb) (push args ran))))
+        (setq buffer (find-file-noselect (expand-file-name "a.txt" root)))
+        (unwind-protect
+            (with-current-buffer buffer
+              (legu-mode 1)
+              (should (equal (plist-get legu--painted :reviewed) '((1 . 20))))
+              (should-not ran))
+          (kill-buffer buffer))))))
 
 
 ;;;; Regressions

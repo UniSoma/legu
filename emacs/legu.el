@@ -908,7 +908,8 @@ generation is not bumped: the next real snapshot replaces this wholesale."
 (defvar-local legu--unverified nil)
 (defvar-local legu--scope 'unknown)
 (defvar-local legu--stale-count 0)
-(defvar-local legu--tier0-unresolved nil)
+(defvar-local legu--unaccounted nil
+  "Whether some record here is accounted for by nothing legu currently trusts.")
 (defvar-local legu--painted nil
   "Plist of the ranges last painted: `:reviewed', `:stale', `:total'.")
 (defvar-local legu--hidden nil)
@@ -916,16 +917,126 @@ generation is not bumped: the next real snapshot replaces this wholesale."
   "Cons of (HASH . TIME) recording when this content was first seen here.")
 (defvar-local legu--regions-request 0
   "Generation of the newest `legu-describe-region' request in this buffer.")
+(defvar-local legu--file-regions nil
+  "This buffer's accepted per-file `legu regions' answer, or nil.
+A plist of `:reviewed' `:stale' `:tickets' `:complete' and the `:hash' of
+the file it describes.")
+(defvar-local legu--file-regions-request 0
+  "Generation of the newest per-file regions request in this buffer.")
+(defvar-local legu--file-regions-wanted nil
+  "Whether this buffer needs a per-file query that has not been answered.")
 
 (defvar legu--nudged nil
   "Whether the region-size nudge has already fired this session.")
+
+;;;; Tier 0.5: one `legu regions' for the file in front of you
+;;
+;; Between the sidecar and the repository snapshot.  It comes from the CLI,
+;; so unlike tier 0 it may pronounce stale, moved or missing -- which is how
+;; a file whose regions were read under a previous name paints at all before
+;; a snapshot has run.
+
+(defun legu--file-regions-parse (answer)
+  "Ranges to paint from a parsed `legu regions --json' ANSWER.
+A record the CLI could not anchor carries no range and paints nothing."
+  (let (reviewed stale tickets)
+    (dolist (r (alist-get 'regions answer))
+      (let ((start (alist-get 'start r))
+            (end (alist-get 'end r)))
+        (when (and start end)
+          (pcase (alist-get 'state r)
+            ("reviewed" (push (cons start end) reviewed))
+            ("stale" (push (cons start end) stale))))))
+    (dolist (tk (alist-get 'tickets answer))
+      (when-let* ((start (alist-get 'start tk)))
+        (push start tickets)))
+    (list :reviewed (legu--ranges-normalize reviewed)
+          :stale (legu--ranges-normalize stale)
+          :tickets (sort (delete-dups tickets) #'<)
+          :complete (and (alist-get 'complete answer) t))))
+
+(defun legu--snapshot-outranks-p (started)
+  "Whether a snapshot this buffer trusts, newer than STARTED, already answers.
+The repository snapshot is the higher tier: once it has landed and may
+pronounce here, a per-file answer requested before it has nothing to add.
+
+The test has to be the one `legu--compute\=' paints by.  A weaker one --
+mtime alone -- would throw the answer away for a snapshot that then
+declines to speak here, and leave the buffer painting nothing until the
+next save."
+  (let ((snapshot (legu-snapshot legu--root)))
+    (and snapshot
+         (legu--snapshot-vouches-p snapshot buffer-file-name)
+         (not (time-less-p (plist-get snapshot :started) started)))))
+
+(defun legu--file-regions-query (&optional buffer)
+  "Ask the CLI for BUFFER's own anchors, asynchronously.
+Nothing here blocks Emacs, and the answer is dropped unless it still
+describes the file it was asked about: the same guard
+`legu-describe-region' uses, plus the snapshot that may have overtaken it."
+  (with-current-buffer (or buffer (current-buffer))
+    (when (and legu--root legu--relpath buffer-file-name
+               (not (buffer-modified-p)))
+      (let* ((buf (current-buffer))
+             (file buffer-file-name)
+             (hash (legu--file-hash file))
+             (tick (buffer-chars-modified-tick))
+             (started (current-time))
+             (request (setq legu--file-regions-request
+                            (1+ legu--file-regions-request))))
+        (legu--run
+         legu--root (list "regions" legu--relpath "--json")
+         (lambda (status stdout _stderr)
+           (when (buffer-live-p buf)
+             (with-current-buffer buf
+               (when-let* (((= request legu--file-regions-request))
+                           ((= tick (buffer-chars-modified-tick)))
+                           ((equal hash (legu--file-hash file)))
+                           ((not (legu--snapshot-outranks-p started)))
+                           ((eq status 'ok))
+                           (answer (legu--parse-json stdout)))
+                 (setq legu--file-regions
+                       (plist-put (legu--file-regions-parse answer) :hash hash))
+                 (legu--repaint buf))))))))))
+
+(defun legu--file-regions-here (trusted hash)
+  "This buffer's per-file answer, if it still has something to say.
+Nothing, when a snapshot TRUSTED here already answers -- that is the
+higher tier, and it is the later reading.  A change to the file since the
+answer was given retires the answer outright.
+
+HASH is the file\='s current hash if tier 0 already had reason to compute
+one; the file is hashed here only when it did not."
+  (when legu--file-regions
+    (if (equal (plist-get legu--file-regions :hash)
+               (or hash (legu--file-hash buffer-file-name)))
+        (and (not trusted) legu--file-regions)
+      (setq legu--file-regions nil))))
+
+(defun legu--file-regions-maybe-query ()
+  "Run the per-file query if the last repaint found it needed.
+Called from the three moments the file on disk can have become a
+different file -- opening it, saving it, reverting it -- and not from
+`legu--repaint\=', which also runs on a window change and a landing
+snapshot, and would spawn a process for each."
+  (when legu--file-regions-wanted (legu--file-regions-query)))
+
+(defun legu--file-accounted-for-p (tier0)
+  "Whether the local pass alone accounts for this file.
+True only when the sidecar was readable, had something to say, and every
+record in it was confirmed.  A file with no sidecar at its current path is
+not accounted for -- that is the rename, and it is what tier 0.5 is for."
+  (and (plist-get tier0 :ok)
+       (plist-get tier0 :hash)
+       (not (plist-get tier0 :unresolved))))
 
 (defun legu--compute (&optional buffer)
   "State to paint in BUFFER, as a plist of `:reviewed' `:stale' `:tickets'.
 
 Local computation may confirm \"reviewed, in place\".  It may never
 pronounce \"stale\", \"moved\" or \"missing\": those verdicts come only
-from the CLI, and only from a snapshot newer than the file."
+from the CLI, and only while it is still describing this file -- a
+snapshot newer than the file, or a per-file answer no edit has overtaken."
   (with-current-buffer (or buffer (current-buffer))
     (let* ((root legu--root)
            (rel legu--relpath)
@@ -933,6 +1044,7 @@ from the CLI, and only from a snapshot newer than the file."
            (tier0 (legu--tier0 root rel file))
            (snapshot (legu-snapshot root))
            (trusted (legu--trusted-here snapshot file tier0))
+           (per-file (legu--file-regions-here trusted (plist-get tier0 :hash)))
            (rows (plist-get snapshot :rows))
            (row (and rows (gethash rel rows)))
            (snap-reviewed (and trusted row (plist-get row :ranges)))
@@ -943,14 +1055,27 @@ from the CLI, and only from a snapshot newer than the file."
                                            (equal (nth 3 e) "stale"))
                                   (push (cons (nth 0 e) (nth 1 e)) out)))
                               (legu--ranges-normalize out))))
-           (reviewed (legu--ranges-union (plist-get tier0 :reviewed) snap-reviewed))
-           (stale (legu--ranges-subtract snap-stale reviewed))
+           (reviewed (legu--ranges-union
+                      (legu--ranges-union (plist-get tier0 :reviewed) snap-reviewed)
+                      (plist-get per-file :reviewed)))
+           (stale (legu--ranges-subtract
+                   (legu--ranges-union snap-stale (plist-get per-file :stale))
+                   reviewed))
            (tickets (plist-get tier0 :tickets)))
       (when (and trusted row)
         (dolist (e (gethash rel (plist-get snapshot :tickets)))
           (when (nth 0 e) (push (nth 0 e) tickets))))
-      (setq legu--tier0-unresolved
-            (and (plist-get tier0 :unresolved) (not trusted)))
+      (setq tickets (append tickets (plist-get per-file :tickets)))
+      ;; A complete per-file answer resolves what the sidecar left open; an
+      ;; incomplete one is itself a reason to keep the indicator up.
+      (setq legu--unaccounted
+            (and (not trusted)
+                 (if per-file
+                     (not (plist-get per-file :complete))
+                   (and (plist-get tier0 :unresolved) t))))
+      (setq legu--file-regions-wanted
+            (and (not trusted) (null per-file)
+                 (not (legu--file-accounted-for-p tier0))))
       (setq legu--scope
             (cond ((null snapshot) 'unknown)
                   ((and (plist-get snapshot :eligible)
@@ -961,27 +1086,32 @@ from the CLI, and only from a snapshot newer than the file."
             :stale stale
             :tickets (sort (delete-dups tickets) #'<)))))
 
-(defun legu--trusted-here (snapshot file tier0)
-  "Whether SNAPSHOT may pronounce on FILE, given what TIER0 could confirm.
+(defun legu--snapshot-vouches-p (snapshot file)
+  "Whether SNAPSHOT may pronounce on FILE, given what this buffer has watched.
 
 Mtime alone is not enough in the one state where the snapshot claims more
 than local computation can check: a file whose mtime was backdated -- by
-an archive, an rsync, a `touch' -- would otherwise let a snapshot vouch
-for content it never saw."
+an archive, an rsync, a `touch\=' -- would otherwise let a snapshot vouch
+for content it never saw.  So a snapshot older than a change this buffer
+watched happen may not vouch for it, however new its mtime claims to be."
+  (and (legu-snapshot-trusted-p snapshot file)
+       (or (null (cdr legu--content-seen))
+           (time-less-p (cdr legu--content-seen)
+                        (plist-get snapshot :started)))))
+
+(defun legu--trusted-here (snapshot file tier0)
+  "Whether SNAPSHOT may pronounce on FILE, given what TIER0 could confirm.
+Records what this buffer has watched of the file, then asks
+`legu--snapshot-vouches-p\='."
   (let ((hash (plist-get tier0 :hash)))
     (cond
      ;; First sight of this file.  An mtime is all there is to go on, which is
      ;; the ordinary case: open a file the last snapshot already covered.
      ((null legu--content-seen) (setq legu--content-seen (cons hash nil)))
-     ;; The content changed while this buffer was watching.  Now the mtime is
-     ;; checkable, and a snapshot older than the change may not vouch for it
-     ;; however new its mtime claims to be.
+     ;; The content changed while this buffer was watching.
      ((not (equal hash (car legu--content-seen)))
       (setq legu--content-seen (cons hash (current-time)))))
-    (and (legu-snapshot-trusted-p snapshot file)
-         (or (null (cdr legu--content-seen))
-             (time-less-p (cdr legu--content-seen)
-                          (plist-get snapshot :started))))))
+    (legu--snapshot-vouches-p snapshot file)))
 
 (defun legu--repaint (&optional buffer)
   "Recompute and repaint BUFFER."
@@ -1003,7 +1133,7 @@ for content it never saw."
            :frontier (and legu--frontier
                           (marker-position legu--frontier)
                           (legu--line-number legu--frontier))
-           :unverified (or legu--unverified legu--tier0-unresolved)
+           :unverified (or legu--unverified legu--unaccounted)
            :out-of-scope (eq legu--scope 'out))))
       (force-mode-line-update))))
 
@@ -1092,7 +1222,7 @@ marking one would be rejected."
        (concat
         (when (and lines (> lines 0))
           (format " %d%%" (/ (* 100 (plist-get cov :reviewed)) lines)))
-        (when legu--tier0-unresolved "?")
+        (when legu--unaccounted "?")
         (when (> legu--stale-count 0)
           (propertize (format "▪%d" legu--stale-count) 'face 'warning))
         (when (plist-get snapshot :errors)
@@ -1737,14 +1867,16 @@ CLI can see is no longer the file on screen."
   "Re-derive state from the saved file and ask for a fresh snapshot."
   (setq legu--unverified nil)
   (legu--repaint)
-  (when legu--tier0-unresolved
+  (legu--file-regions-maybe-query)
+  (when legu--unaccounted
     (legu-refresh-snapshot legu--root (legu--snapshot-debounce legu--root))))
 
 (defun legu--after-revert ()
   "Tear down and repaint after the buffer was reverted."
   (legu-overlay-clear)
   (setq legu--frontier nil legu--unverified nil)
-  (legu--repaint))
+  (legu--repaint)
+  (legu--file-regions-maybe-query))
 
 (defun legu--window-change (_frame)
   "Repaint if the buffer moved between a graphical frame and a terminal."
@@ -1853,7 +1985,8 @@ it does not count."
           (add-hook 'window-buffer-change-functions #'legu--window-change)
           (legu--watch-store root)
           (legu--repaint)
-          (when legu--tier0-unresolved
+          (legu--file-regions-maybe-query)
+          (when legu--unaccounted
             (legu-refresh-snapshot root (legu--snapshot-debounce root)))
           (legu--first-visit root))))
     (legu--teardown)))
@@ -1861,7 +1994,7 @@ it does not count."
 (defun legu--teardown ()
   "Remove this buffer's overlays and hooks, and the repository's if it is the last."
   (legu-overlay-clear)
-  (setq legu--content-seen nil)
+  (setq legu--content-seen nil legu--file-regions nil)
   (remove-hook 'first-change-hook #'legu--first-change t)
   (remove-hook 'after-save-hook #'legu--after-save t)
   (remove-hook 'after-revert-hook #'legu--after-revert t)

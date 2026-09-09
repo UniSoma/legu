@@ -125,7 +125,7 @@ numbers, not a score. `legu-dired-column` set to nil turns it off.
 
 ## How it stays fast, and honest
 
-Three tiers, with one rule binding them: **local computation may confirm
+Four tiers, with one rule binding them: **local computation may confirm
 "read, in place"; it may never pronounce "stale", "moved" or "missing".**
 Those verdicts come only from the CLI.
 
@@ -138,14 +138,27 @@ an older asynchronous answer.
 1. **The sidecar and a file hash.** Opening a file reads
    `.review/<path>.edn` and hashes the file — no subprocess at all. A record
    whose stored `file-hash` still matches is exactly the case the CLI's own
-   anchoring answers immediately, so it can be painted with no process. A
-   record whose hash differs paints *nothing*, and asks for a snapshot.
-2. **A repository snapshot**, from one `legu status --json` and one
+   anchoring answers immediately, so it can be painted with no process. A file
+   whose every record matches this way is the one case that runs nothing else.
+2. **A per-file query.** When the sidecar at the file's current path cannot
+   account for it — there is none, or a record's hash no longer matches — and
+   no trusted snapshot already covers it, one `legu regions <path> --json`
+   runs for that file alone, asynchronously, and paints the reviewed and
+   stale regions and the ticket lines at their current anchors. It is the CLI, so unlike
+   the sidecar pass above it may pronounce stale, moved or missing. This is
+   what paints a file whose regions were read under a previous name, before
+   any snapshot has run. The answer is dropped if the buffer changed since it
+   was asked for, or if a newer answer or a trusted snapshot has overtaken it;
+   an incomplete one paints what was resolved and keeps the unverified
+   indicator. The same query runs after save and after revert, under the same
+   condition. Once a snapshot is cached, most opens are covered by it and this
+   tier is skipped too.
+3. **A repository snapshot**, from one `legu status --json` and one
    `legu stale --json`, run asynchronously and cached. `legu coverage` and
    `legu next` are never invoked: both are arithmetic over the same rows, and
    an ERT test asserts the derived numbers equal the CLI's own, row for row.
    That halves the work a refresh costs.
-3. **An optimistic patch** while a mark is in flight, drawn in the unverified
+4. **An optimistic patch** while a mark is in flight, drawn in the unverified
    style until legu confirms it.
 
 A snapshot may only pronounce on a file it is newer than. Without that guard
@@ -269,7 +282,7 @@ the mark it produced.
 emacs -Q --batch -L . -l legu-tests.el -f ert-run-tests-batch-and-exit
 ```
 
-107 tests. The pure half covers range arithmetic, the EDN reader, the derived
+119 tests. The pure half covers range arithmetic, the EDN reader, the derived
 coverage numbers, the dired column's sums and formatting, painting
 precedence and the overlay lifecycle. The other
 half drives the real `legu` binary against real scratch git repositories —
@@ -291,11 +304,6 @@ emacs -Q --batch -L . -L /path/to/evil -L /path/to/goto-chg \
 
 ## Known limits
 
-- **Renames are a blind spot for tier 0.** Sidecars are keyed by the path at
-  review time, so a region read under an old name paints as unreviewed until the
-  next snapshot lands — seconds, bounded by the `.review/` watcher, not a
-  session. `legu-test-integration-rename-is-the-documented-tier0-blind-spot`
-  asserts this, so a future fix breaks visibly.
 - **A mark is painted before legu confirms it**, in the unverified style.
   Failures revert and are logged to `*legu-failures*`.
 - **Ghost regions are shown, never repaired.** A mark that partially overlaps
