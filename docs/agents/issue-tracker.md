@@ -39,7 +39,9 @@ Set `--mode afk` only when the ticket is fully specified; set `-p` (0 = highest,
 ## When a skill says "fetch the relevant ticket"
 
 `knot show <id>`. For everything around it: `knot list --parent <id>` (children),
-`knot list --closure <id>` (transitively related, archive included), `knot dep tree <id>` (what it waits on).
+`knot list --closure <id>` (live tickets transitively related), `knot dep tree <id>` (what it waits on).
+The closure walks the archive to find its edges but `list` renders only live tickets: to see the closed ones
+it reached, run `knot closed --closure <id>`.
 
 ## When a skill says "comment on the ticket"
 
