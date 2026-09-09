@@ -6,7 +6,7 @@ type: task
 priority: 2
 mode: afk
 created: '2026-09-09T14:24:19.343421336Z'
-updated: '2026-09-09T15:41:44.545131119Z'
+updated: '2026-09-09T17:38:51.804081960Z'
 closed: '2026-09-09T15:41:44.545131119Z'
 parent: lgu-01m238vjgnh6
 acceptance:
@@ -77,3 +77,20 @@ Criterion 7's escape hatch was taken: there is no emacs on this machine, so emac
 Two help strings kept wording that disagrees with CONTEXT.md and ADR-0006; rewording user-facing text under a no-behavior-change ticket was the wrong place, so lgu-01m23d9faenk carries them.
 
 Suite: 27 tests, 105 assertions, green. Linter at its two-finding baseline.
+
+**2026-09-09T17:38:51.804081960Z**
+
+Criterion 7's escape hatch is now discharged for real. emacs 30.1 is in
+.sandbox/Dockerfile, and emacs/legu-tests.el has been run against the
+rewritten CLI: 145 tests, 51 of them driving the real binary against scratch
+git repositories, all green. With evil and goto-chg on the load path the evil
+group runs too, 145/145.
+
+Nothing in the Emacs package broke. The inspection recorded in the close
+summary held: every command line legu.el builds still parses and answers as
+before.
+
+The one failure the run turned up is older than this epic and unrelated to
+argument parsing: the suite leaks a debounce timer past the scratch repo it
+points at, and the stray "Error running timer" lands in the version-handshake
+test's message count. Filed as lgu-01m23m0a9jfh and fixed there.

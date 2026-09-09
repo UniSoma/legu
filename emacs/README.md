@@ -289,7 +289,7 @@ the mark it produced.
 emacs -Q --batch -L . -l legu-tests.el -f ert-run-tests-batch-and-exit
 ```
 
-134 tests. The pure half covers range arithmetic, the EDN reader, the derived
+145 tests. The pure half covers range arithmetic, the EDN reader, the derived
 coverage numbers, the dired column's sums and formatting, painting
 precedence and the overlay lifecycle. The other
 half drives the real `legu` binary against real scratch git repositories —
@@ -299,15 +299,20 @@ byte and no trailing newline. If that ever drifts, the fast path is silently
 wrong, and this is the test that says so.
 
 The suite skips its integration half when `legu` is not installed, and its
-evil group when evil is not on the load path:
+evil group when evil is not on the load path. `-Q` drops the site files that
+put a package manager's directories on `load-path`, so name evil and its
+`goto-chg` dependency yourself:
 
 ```
 emacs -Q --batch -L . -L /path/to/evil -L /path/to/goto-chg \
-      -L /path/to/evil-collection \
-      --eval '(setq evil-want-keybinding nil)' -l evil -l evil-collection \
-      --eval '(progn (evil-mode 1) (evil-collection-init))' \
+      --eval '(setq evil-want-keybinding nil)' -l evil \
+      --eval '(evil-mode 1)' \
       -l legu-tests.el -f ert-run-tests-batch-and-exit
 ```
+
+evil-collection is not needed. The group gates on evil alone, and the one test
+that could tell the two apart checks that legu's queue bindings beat
+`compilation-mode`'s, which is base Emacs.
 
 ## Known limits
 

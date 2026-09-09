@@ -696,6 +696,16 @@ FILES is a list of (RELPATH . CONTENT).  Skips unless legu is installed."
                       (string-prefix-p root (buffer-file-name buffer)))
              (with-current-buffer buffer (set-buffer-modified-p nil))
              (kill-buffer buffer)))
+         ;; Neither table is let-bound above, so a debounce timer or a store
+         ;; watcher armed here outlives the directory it points at and fires
+         ;; into whichever test is running by then.  The watchers go first: a
+         ;; watch still live re-arms the timer the moment anything pumps.
+         (dolist (entry (gethash root legu--watchers))
+           (ignore-errors (file-notify-rm-watch (cdr entry))))
+         (remhash root legu--watchers)
+         (when-let* ((timer (gethash root legu--refresh-timers)))
+           (cancel-timer timer))
+         (remhash root legu--refresh-timers)
          (delete-directory root t)))))
 
 (defun legu-test--git (&rest args)
@@ -726,6 +736,20 @@ FILES is a list of (RELPATH . CONTENT).  Skips unless legu is installed."
 (defun legu-test--lines (n)
   "N numbered lines of text."
   (mapconcat (lambda (i) (format "line %d" i)) (number-sequence 1 n) "\n"))
+
+(ert-deftest legu-test-integration-a-finished-repo-leaves-nothing-armed ()
+  "A scratch repo's debounce timer and store watchers die with its directory.
+One that outlives it fires into a directory that is gone, and Emacs
+reports that through `message' -- inside whichever test is running by
+then, which is how this suite acquired a flake."
+  (let (finished)
+    (legu-test--with-repo '(("a.txt" . "one\ntwo\n"))
+      (setq finished root)
+      (make-directory (expand-file-name ".review" root))
+      (legu--watch-store root)
+      (legu-refresh-snapshot root 30))
+    (should-not (gethash finished legu--refresh-timers))
+    (should-not (gethash finished legu--watchers))))
 
 (ert-deftest legu-test-integration-file-hash-matches-the-cli ()
   "The single test that catches upstream drift on the day it lands."
