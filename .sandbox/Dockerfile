@@ -2,6 +2,40 @@ FROM aishell:foundation
 
 SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
 
+# >>> emacs >>>
+# emacs/README.md wants Emacs 30.1 or newer and transient 0.7.2; trixie's
+# emacs-nox is 30.1 and bundles transient 0.7.2.2, so neither is built here.
+# evil and goto-chg let legu-tests.el run its evil group instead of skipping it.
+# evil-collection is not packaged for trixie, and no test's skip guard asks for
+# it -- the group gates on evil alone -- so it stays out.
+ARG EMACS_VERSION=1:30.1+1-6+deb13u1
+ARG EVIL_VERSION=1.14.2-4
+ARG GOTO_CHG_VERSION=1.7.5-3
+RUN apt-get update; \
+    apt-get install -y --no-install-recommends \
+    "emacs-nox=${EMACS_VERSION}" \
+    "elpa-evil=${EVIL_VERSION}" \
+    "elpa-goto-chg=${GOTO_CHG_VERSION}"; \
+    rm -rf /var/lib/apt/lists/*; \
+    emacs --version
+# emacs -Q, which the suite needs, drops the site files that put these on
+# `load-path`, so the evil group is run with -L /usr/share/emacs/site-lisp/elpa/evil-1.14.2
+# and -L /usr/share/emacs/site-lisp/elpa/goto-chg-1.7.5.
+# <<< emacs <<<
+
+# >>> shells >>>
+# test/cli_test.clj drives the completion snippets through all three, and since
+# d910ab8 a missing shell fails the suite rather than skipping it.
+ARG ZSH_VERSION=5.9-8+b23
+ARG FISH_VERSION=4.0.2-1
+RUN apt-get update; \
+    apt-get install -y --no-install-recommends \
+    "zsh=${ZSH_VERSION}" "fish=${FISH_VERSION}"; \
+    rm -rf /var/lib/apt/lists/*; \
+    zsh --version; \
+    fish --version
+# <<< shells <<<
+
 # >>> clojure (managed) >>>
 # JDK 25 from Eclipse Temurin (foundation only ships JRE 17 headless).
 COPY --from=eclipse-temurin:25-jdk-jammy /opt/java/openjdk /opt/java/openjdk
@@ -49,3 +83,4 @@ ENV CLJ_SURGEON_CLJ_KONDO_ADMISSION=/usr/local/bin/clj-kondo-admission
 ARG KNOT_VERSION=0.12.0
 RUN bbin install https://github.com/UniSoma/knot.git --tag "v${KNOT_VERSION}"
 # <<< knot (managed) <<<
+
