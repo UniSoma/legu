@@ -390,6 +390,78 @@
         (should-not (string-match-p "b\\.txt\\.edn" text))))))
 
 
+(ert-deftest legu-test-list-render-survives-fontification ()
+  ;; compilation-mode's font-lock strips `face'.  The heading, the counts and
+  ;; the anchors must still read after it has run, and the anchor must still
+  ;; be a compilation message.
+  (let ((legu--snapshots (make-hash-table :test #'equal)))
+    (puthash "/tmp/x/"
+             (list :state 'fresh :started (current-time)
+                   :coverage (list :lines 100 :reviewed 10 :stale 1 :never 89 :files 2)
+                   :queue (list (list :path "a.el" :unreviewed 13 :stale 0
+                                      :ranges '((1 . 13)))))
+             legu--snapshots)
+    (with-temp-buffer
+      (legu-list-mode)
+      (setq legu-list--root "/tmp/x/")
+      (legu-list--render)
+      (font-lock-ensure)
+      (goto-char (point-min))
+      (should (eq 'legu-list-heading (get-text-property (point) 'font-lock-face)))
+      (search-forward "a.el")
+      (should (get-text-property (point) 'compilation-message))
+      (should (memq 'legu-list-path (ensure-list (get-text-property (1- (point)) 'font-lock-face))))
+      (should (memq 'legu-list-anchor (ensure-list (get-text-property (point) 'font-lock-face)))))))
+
+(ert-deftest legu-test-list-columns-line-up-and-zeros-are-dim ()
+  (let ((legu--snapshots (make-hash-table :test #'equal))
+        (rows (make-hash-table :test #'equal)))
+    (dotimes (i 5) (puthash (format "f%d" i) (list :unreviewed 1 :stale 0) rows))
+    (puthash "/tmp/x/"
+             (list :state 'fresh :started (current-time)
+                   :coverage (list :lines 100 :reviewed 10 :stale 1 :never 89 :files 2)
+                   :rows rows
+                   :queue (list (list :path "a.el" :unreviewed 13 :stale 0 :ranges '((1 . 13)))
+                                (list :path "deep/er/path/to/some/file.el"
+                                      :unreviewed 4 :stale 2 :ranges '((1 . 4)))))
+             legu--snapshots)
+    (with-temp-buffer
+      (legu-list-mode)
+      (setq legu-list--root "/tmp/x/")
+      (legu-list--render)
+      (should (string-match-p "NEXT  2 of 5 files" (buffer-string)))
+      ;; Both count columns start at the same screen column.
+      (should (= (progn (goto-char (point-min)) (search-forward "13 unread") (current-column))
+                 (progn (goto-char (point-min)) (search-forward " 4 unread") (current-column))))
+      (goto-char (point-min))
+      (search-forward "0 stale")
+      (should (eq 'legu-list-count (get-text-property (1- (point)) 'face)))
+      (search-forward "2 stale")
+      (should (eq 'legu-stale (get-text-property (1- (point)) 'face))))))
+
+(ert-deftest legu-test-list-says-when-there-is-nothing-to-read ()
+  (let ((legu--snapshots (make-hash-table :test #'equal)))
+    (puthash "/tmp/x/"
+             (list :state 'fresh :started (current-time)
+                   :coverage (list :lines 10 :reviewed 10 :stale 0 :never 0 :files 1))
+             legu--snapshots)
+    (with-temp-buffer
+      (legu-list-mode)
+      (setq legu-list--root "/tmp/x/")
+      (legu-list--render)
+      (should (string-match-p "nothing to read" (buffer-string)))
+      (setq legu-list--filter 'stale)
+      (legu-list--render)
+      (should (string-match-p "no stale regions" (buffer-string)))
+      (should (string-match-p "stale only" (buffer-string))))))
+
+(ert-deftest legu-test-list-percent-never-rounds-a-few-lines-away ()
+  (should (equal " <0.1%" (legu-list--percent 0.0001)))
+  (should (equal ">99.9%" (legu-list--percent 0.9999)))
+  (should (equal "  0.0%" (legu-list--percent 0)))
+  (should (equal "100.0%" (legu-list--percent 1))))
+
+
 ;;;; JSON edge cases
 
 (ert-deftest legu-test-json-null-and-false-are-nil ()

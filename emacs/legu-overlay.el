@@ -105,6 +105,22 @@ fringe already belongs to `diff-hl'."
   "Face for counts in the queue buffer."
   :group 'legu)
 
+(defface legu-list-path '((t :inherit default))
+  "Face for the path of a queue row."
+  :group 'legu)
+
+(defface legu-list-anchor '((t :inherit shadow))
+  "Face for the `:start:end:' that follows a queue row's path."
+  :group 'legu)
+
+(defface legu-list-key '((t :inherit font-lock-keyword-face :weight bold))
+  "Face for a key name in the queue buffer's hints."
+  :group 'legu)
+
+(defface legu-list-never '((t :inherit shadow))
+  "Face for the never-read row of the coverage block."
+  :group 'legu)
+
 (defface legu-error '((t :inherit error))
   "Face for the broken-store lighter and banner."
   :group 'legu)

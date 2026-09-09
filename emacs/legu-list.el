@@ -44,6 +44,9 @@
   "c" #'legu-coverage
   "?" #'legu-dispatch)
 
+(defconst legu-list--font-lock-keywords '((compilation--ensure-parse))
+  "Only the parser.  The generic compilation rules would paint every row.")
+
 (define-derived-mode legu-list-mode compilation-mode "legu"
   "The legu reading queue.
 
@@ -53,7 +56,14 @@
   (setq-local compilation-error-screen-columns nil)
   (setq-local next-error-function #'compilation-next-error-function)
   (setq-local revert-buffer-function #'legu-list--revert)
-  (setq-local truncate-lines t))
+  (setq-local truncate-lines t)
+  ;; The parser paints every `path:start:end:' it finds.  Give it this
+  ;; buffer's faces so the anchor reads as a path, not as a compiler error.
+  (setq-local font-lock-defaults '(legu-list--font-lock-keywords t))
+  (setq-local compilation-message-face 'legu-list-anchor)
+  (setq-local compilation-error-face 'legu-list-path)
+  (setq-local compilation-line-face 'legu-list-anchor)
+  (hl-line-mode 1))
 
 (defun legu-list--buffer-name (root)
   "Name of ROOT's queue buffer.
@@ -103,10 +113,36 @@ With a prefix argument THIS-FILE, scope it to the current file."
     (legu-refresh-snapshot root)
     (legu-list--render)))
 
-(defun legu-list--bar (fraction width)
-  "A WIDTH character bar FRACTION full."
+(defvar legu-list--anchor-width 46
+  "Column the row text starts at, sized to the section being drawn.")
+
+(defun legu-list--face (text face)
+  "TEXT in FACE, whether or not font-lock is on.
+`compilation-mode' fontifies, and fontification strips `face'; what it
+leaves alone is `font-lock-face'."
+  (propertize text 'face face 'font-lock-face face))
+
+(defun legu-list--right (text)
+  "A spacer that pushes TEXT to the window's right edge."
+  (concat (propertize " " 'display `(space :align-to (- right ,(1+ (length text)))))
+          text))
+
+(defun legu-list--bar (fraction width face)
+  "A bar FRACTION of WIDTH long, painted in FACE.
+Anything too small for one cell still shows as a sliver, so a repository
+with a few lines read does not look like one with none."
   (let ((n (round (* fraction width))))
-    (concat (make-string n ?█) (make-string (max 0 (- width n)) ?░))))
+    (legu-list--face (cond ((> n 0) (make-string n ?█))
+                           ((> fraction 0) "▏")
+                           (t ""))
+                     face)))
+
+(defun legu-list--percent (fraction)
+  "FRACTION as a percentage that never rounds a few lines to nothing."
+  (let ((pct (* 100 fraction)))
+    (cond ((and (> pct 0) (< pct 0.05)) " <0.1%")
+          ((and (< pct 100) (> pct 99.95)) ">99.9%")
+          (t (format "%5.1f%%" pct)))))
 
 (defun legu-list--render ()
   "Draw the queue from the cached snapshot.  Never shells out."
@@ -117,27 +153,53 @@ With a prefix argument THIS-FILE, scope it to the current file."
          (legu-list--record-cache (make-hash-table :test #'equal))
          (cov (plist-get snapshot :coverage)))
     (erase-buffer)
-    (let ((heading (format "Review coverage — %s"
-                           (file-name-nondirectory (directory-file-name root)))))
-      (insert (propertize heading 'face 'legu-list-heading))
-      (insert (propertize (format "%s%s\n"
-                                  (make-string (max 2 (- 52 (length heading))) ?\s)
-                                  (legu-snapshot-age-string snapshot))
-                          'face 'legu-list-count)))
+    (insert (legu-list--face
+             (format "Review coverage — %s"
+                     (file-name-nondirectory (directory-file-name root)))
+             'legu-list-heading))
+    (when legu-list--scope
+      (insert (legu-list--face (format " · %s" legu-list--scope) 'legu-list-path)))
+    (insert (legu-list--right
+             (legu-list--face (legu-snapshot-age-string snapshot) 'legu-list-count))
+            "\n")
     (when (or (eq (plist-get snapshot :state) 'error)
               (plist-get snapshot :errors))
       (legu-list--insert-error snapshot))
     (if (null cov)
-        (insert "\n  no snapshot yet — press g\n")
+        (insert "\n  " (legu-list--face "no snapshot yet — press g" 'legu-list-count) "\n")
       (legu-list--insert-coverage cov))
-    (legu-list--insert-stale snapshot)
-    (legu-list--insert-next snapshot)
-    (insert "\n"
-            (propertize
-             "RET visit   r mark   s diff   t ticket   k forget   f filter   g refresh   c coverage\n"
-             'face 'legu-list-count))
+    (let ((stale (legu-list--insert-stale snapshot))
+          (next (legu-list--insert-next snapshot)))
+      (legu-list--insert-empty cov stale next))
+    (insert "\n" (legu-list--face
+                  (legu-list--keys '("RET" "visit") '("r" "mark") '("s" "diff")
+                                   '("t" "ticket") '("k" "forget") '("f" "filter")
+                                   '("g" "refresh") '("c" "coverage"))
+                  'legu-list-count)
+            "\n")
     (goto-char (point-min))
     (forward-line (1- line))))
+
+(defun legu-list--keys (&rest pairs)
+  "The footer: every (KEY LABEL) in PAIRS, keys picked out."
+  (mapconcat (lambda (p)
+               (concat (legu-list--face (car p) 'legu-list-key) " " (cadr p)))
+             pairs "   "))
+
+(defun legu-list--insert-empty (cov stale next)
+  "Say what an empty queue means, given the section counts STALE and NEXT.
+Silence would look like a broken render."
+  (when (and cov (= 0 stale) (= 0 next))
+    (insert "\n  "
+            (legu-list--face
+             (pcase legu-list--filter
+               ('stale "no stale regions")
+               ('unread "no unread files")
+               (_ (if legu-list--scope
+                      "this file is fully read"
+                    "nothing to read — every eligible line is read")))
+             'legu-list-count)
+            "\n")))
 
 (defun legu-list--insert-error (snapshot)
   "Insert SNAPSHOT's store error banner.
@@ -148,17 +210,21 @@ and short by whatever those files hold."
         (errors (plist-get snapshot :errors)))
     (cond
      (err
-      (insert (propertize "\nSTORE ERROR — every legu command is failing\n"
-                          'face 'legu-error))
+      (insert "\n" (legu-list--face "STORE ERROR — every legu command is failing"
+                                    'legu-error)
+              "\n")
       (insert (format "  %s\n" (plist-get err :message)))
       (when (plist-get snapshot :started)
         (insert (format "  Numbers below are from the last good snapshot, %s.\n"
                         (legu-snapshot-age-string snapshot)))))
      (errors
-      (insert (propertize (format "\nSTORE ERROR — %d sidecar%s skipped; the numbers below leave %s out\n"
-                                  (length errors) (if (= 1 (length errors)) "" "s")
-                                  (if (= 1 (length errors)) "it" "them"))
-                          'face 'legu-error))
+      (insert "\n"
+              (legu-list--face
+               (format "STORE ERROR — %d sidecar%s skipped; the numbers below leave %s out"
+                       (length errors) (if (= 1 (length errors)) "" "s")
+                       (if (= 1 (length errors)) "it" "them"))
+               'legu-error)
+              "\n")
       (dolist (e errors)
         (insert (propertize (format "  %s   %s\n" (plist-get e :file) (plist-get e :reason))
                             'legu-store-error
@@ -166,19 +232,32 @@ and short by whatever those files hold."
       (insert "  RET visits the file (smerge-mode if it has conflict markers), then press g.\n")))))
 
 (defun legu-list--insert-coverage (cov)
-  "Insert the three numbers of COV, as three rows.  Never one number."
-  (let ((lines (max 1 (plist-get cov :lines))))
+  "Insert the three numbers of COV, as three rows.  Never one number.
+The bars share one scale, so the three rows read as one stacked bar."
+  (let ((lines (max 1 (plist-get cov :lines)))
+        (width (max 8 (min 40 (- (window-body-width (get-buffer-window)) 34)))))
     (insert "\n")
-    (dolist (row (list (list "never read" (plist-get cov :never))
-                       (list "read" (plist-get cov :reviewed))
-                       (list "stale" (plist-get cov :stale))))
-      (let ((fraction (/ (float (nth 1 row)) lines)))
-        (insert (format "  %-12s %8d  %5.1f%%  %s\n"
-                        (nth 0 row) (nth 1 row) (* 100 fraction)
-                        (legu-list--bar fraction 35)))))
-    (insert (propertize (format "  %-12s %d files / %d lines\n"
-                                "eligible" (plist-get cov :files) (plist-get cov :lines))
-                        'face 'legu-list-count))))
+    (pcase-dolist (`(,label ,count ,face)
+                   (list (list "never read" (plist-get cov :never) 'legu-list-never)
+                         (list "read" (plist-get cov :reviewed) 'legu-reviewed)
+                         (list "stale" (plist-get cov :stale) 'legu-stale)))
+      (let ((fraction (/ (float count) lines)))
+        (insert "  " (legu-list--face (format "%-12s" label) face)
+                (format "%8d  " count)
+                (legu-list--face (legu-list--percent fraction)
+                                 (if (= count 0) 'legu-list-count 'default))
+                "  " (legu-list--bar fraction width face) "\n")))
+    (insert (legu-list--face
+             (format "  %-12s %d files · %d lines" "eligible"
+                     (plist-get cov :files) (plist-get cov :lines))
+             'legu-list-count)
+            (legu-list--right
+             (concat (legu-list--face "f" 'legu-list-key) " "
+                     (legu-list--face
+                      (pcase legu-list--filter
+                        ('stale "stale only") ('unread "unread only") (_ "all"))
+                      'legu-list-count)))
+            "\n")))
 
 (defun legu-list--row (path start end kind text)
   "Insert one navigable row.
@@ -187,13 +266,26 @@ properties are what this package itself reads, so a path containing a
 colon still visits correctly."
   (let ((from (point))
         (anchor (format "%s:%s:%s:" path (or start 1) (or end start 1))))
-    (insert (format "%s%s %s\n" anchor
-                    (make-string (max 1 (- 46 (length anchor))) ?\s)
-                    text))
+    (insert (legu-list--face path 'legu-list-path)
+            (legu-list--face (substring anchor (length path)) 'legu-list-anchor)
+            (make-string (max 2 (- legu-list--anchor-width (length anchor))) ?\s)
+            text "\n")
     (put-text-property from (point) 'legu-path path)
     (put-text-property from (point) 'legu-start (or start 1))
     (put-text-property from (point) 'legu-end (or end start 1))
     (put-text-property from (point) 'legu-kind kind)))
+
+(defun legu-list--anchor-width (anchors)
+  "The column the row text starts at, given every anchor of a section.
+Wide enough that the columns line up, never so wide that a single deep
+path pushes them off the screen."
+  (let ((longest (apply #'max 0 (mapcar #'length anchors))))
+    (min 72 (max 36 (+ longest 3)))))
+
+(defun legu-list--count (n unit &optional face)
+  "N and UNIT as a count cell.  A zero is dimmed; N > 0 wears FACE."
+  (legu-list--face (format "%5d %s" n unit)
+                   (cond ((= n 0) 'legu-list-count) (face face) (t 'default))))
 
 (defun legu-list--scoped-p (path)
   "Whether PATH passes this buffer's scope."
@@ -215,10 +307,21 @@ colon still visits correctly."
             (setq best r))))
       best)))
 
+(defun legu-list--heading (name count unit &optional total)
+  "Insert a section heading: NAME, then COUNT UNITs, of TOTAL when truncated."
+  (insert "\n"
+          (legu-list--face (format "%s  " name) 'legu-list-heading)
+          (legu-list--face
+           (format "%d%s %s%s" count
+                   (if (and total (> total count)) (format " of %d" total) "")
+                   unit (if (= 1 (or total count)) "" "s"))
+           'legu-list-count)
+          "\n"))
+
 (defun legu-list--insert-stale (snapshot)
-  "Insert SNAPSHOT's stale regions."
-  (unless (eq legu-list--filter 'unread)
-    (let ((rows nil))
+  "Insert SNAPSHOT's stale regions.  Returns how many rows were drawn."
+  (let ((rows nil))
+    (unless (eq legu-list--filter 'unread)
       (when-let* ((table (plist-get snapshot :stale)))
         (maphash (lambda (path entries)
                    (when (legu-list--scoped-p path)
@@ -229,41 +332,71 @@ colon still visits correctly."
                                   (< (or (nth 0 (cdr a)) 0) (or (nth 0 (cdr b)) 0))
                                 (string< (car a) (car b))))))
       (when rows
-        (insert (propertize (format "\nSTALE  %d region%s\n" (length rows)
-                                    (if (= 1 (length rows)) "" "s"))
-                            'face 'legu-list-heading))
-        (dolist (row rows)
-          (let* ((path (car row)) (e (cdr row))
-                 (state (nth 3 e))
-                 (record (legu-list--record path (or (nth 0 e) 1)))
-                 (when-read (and record (alist-get 'timestamp record))))
-            (legu-list--row
-             path (nth 0 e) (nth 1 e) 'stale
-             (format "%-8s %-18s %s"
-                     (propertize (or state "stale") 'face
+        (legu-list--heading "STALE" (length rows) "region")
+        (let ((legu-list--anchor-width
+               (legu-list--anchor-width
+                (mapcar (lambda (row)
+                          (format "%s:%s:%s:" (car row) (or (nth 0 (cdr row)) 1)
+                                  (or (nth 1 (cdr row)) (nth 0 (cdr row)) 1)))
+                        rows))))
+          (dolist (row rows)
+            (let* ((path (car row)) (e (cdr row))
+                   (state (nth 3 e))
+                   (record (legu-list--record path (or (nth 0 e) 1)))
+                   (when-read (and record (alist-get 'timestamp record))))
+              (legu-list--row
+               path (nth 0 e) (nth 1 e) 'stale
+               (concat
+                (legu-list--face (format "%-8s" (or state "stale"))
                                  (if (equal state "missing") 'legu-missing 'legu-stale))
-                     (or (nth 2 e) "")
-                     (if when-read (format "read %s" (substring when-read 0 10)) "")))))))))
+                (format " %-18s " (or (nth 2 e) ""))
+                (legu-list--face
+                 (if when-read (format "read %s" (substring when-read 0 10)) "")
+                 'legu-list-count))))))))
+    (length rows)))
 
 (defun legu-list--insert-next (snapshot)
-  "Insert SNAPSHOT's reading queue."
-  (unless (eq legu-list--filter 'stale)
-    (let ((rows (seq-filter (lambda (r) (legu-list--scoped-p (plist-get r :path)))
-                            (plist-get snapshot :queue))))
+  "Insert SNAPSHOT's reading queue.  Returns how many rows were drawn."
+  (let ((rows nil))
+    (unless (eq legu-list--filter 'stale)
+      (setq rows (seq-filter (lambda (r) (legu-list--scoped-p (plist-get r :path)))
+                             (plist-get snapshot :queue)))
       (when rows
-        (insert (propertize (format "\nNEXT  %d file%s\n" (length rows)
-                                    (if (= 1 (length rows)) "" "s"))
-                            'face 'legu-list-heading))
-        (dolist (r rows)
-          (let ((ranges (plist-get r :ranges)))
-            (legu-list--row
-             (plist-get r :path)
-             (and ranges (car (car ranges)))
-             (and ranges (cdr (car ranges)))
-             'next
-             (format "%5d unread %5d stale   %s"
-                     (plist-get r :unreviewed) (plist-get r :stale)
-                     (legu-format-ranges ranges)))))))))
+        (legu-list--heading "NEXT" (length rows) "file"
+                            (and (not legu-list--scope)
+                                 (legu-list--files-with-gaps snapshot)))
+        (let ((legu-list--anchor-width
+               (legu-list--anchor-width
+                (mapcar (lambda (r)
+                          (let ((ranges (plist-get r :ranges)))
+                            (format "%s:%s:%s:" (plist-get r :path)
+                                    (or (and ranges (car (car ranges))) 1)
+                                    (or (and ranges (cdr (car ranges))) 1))))
+                        rows))))
+          (dolist (r rows)
+            (let ((ranges (plist-get r :ranges)))
+              (legu-list--row
+               (plist-get r :path)
+               (and ranges (car (car ranges)))
+               (and ranges (cdr (car ranges)))
+               'next
+               (concat (legu-list--count (plist-get r :unreviewed) "unread")
+                       " "
+                       (legu-list--count (plist-get r :stale) "stale" 'legu-stale)
+                       "   "
+                       (legu-list--face (legu-format-ranges ranges) 'legu-list-count))))))))
+    (length rows)))
+
+(defun legu-list--files-with-gaps (snapshot)
+  "How many files in SNAPSHOT still have unread or stale lines, or nil.
+The queue shows at most `legu-next-limit' of them."
+  (when-let* ((rows (plist-get snapshot :rows)))
+    (let ((n 0))
+      (maphash (lambda (_path row)
+                 (when (> (+ (plist-get row :unreviewed) (plist-get row :stale)) 0)
+                   (setq n (1+ n))))
+               rows)
+      n)))
 
 
 ;;;; Row actions
