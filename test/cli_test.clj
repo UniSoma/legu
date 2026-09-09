@@ -127,10 +127,14 @@
     (prints-the-same-as off plain)
     (is (not (str/starts-with? (:out off) "{")))))
 
-(deftest a-negated-option-is-not-a-spelling-this-parser-knows
-  ;; babashka.cli reads --no-json as {:json false}; this parser has no negation
-  ;; at all, so the recording is the error, not an acceptance.
-  (fails-with (scratch-repo!) ["--no-json" "status"] "unknown option: --no-json"))
+(deftest a-negated-option-selects-human-output
+  ;; The one spelling lgu-01m238wawfq7 changes on purpose: the hand-rolled
+  ;; parser had no negation and refused --no-json, babashka.cli reads it as
+  ;; {:json false}.
+  (let [dir (scratch-repo!)
+        off (legu! dir "--no-json" "status")
+        plain (legu! dir "status")]
+    (prints-the-same-as off plain)))
 
 (deftest an-option-the-command-never-reads-is-still-accepted
   ;; lgu-01m238wskh6s scopes options per command and turns this line into an
@@ -140,6 +144,25 @@
         ignored (legu! dir "status" "--limit" "3")
         plain (legu! dir "status")]
     (prints-the-same-as ignored plain)))
+
+(deftest an-argument-is-not-also-an-option-spelling
+  ;; The dispatch tree names each command's arguments so that an option after
+  ;; one is still read. Those names must not become a second way to pass the
+  ;; argument: --target once slipped through, took a value legu never checked,
+  ;; and dropped the real argument without an arity error.
+  (let [dir (scratch-repo!)]
+    (fails-with dir ["mark" "--target" "alpha.txt"] "unknown option: --target")
+    (fails-with dir ["mark" "--target"] "unknown option: --target")
+    (fails-with dir ["status" "--path" "sub"] "unknown option: --path")
+    (fails-with dir ["ticket" "--id" "lgu-01k7"] "unknown option: --id")))
+
+(deftest an-unknown-option-is-named-as-the-reader-typed-it
+  ;; babashka.cli splits a single-dash token into one-character flags, so the
+  ;; message has to find the token again in argv. Matching on the letters it
+  ;; contains once named --json for a typo in -js.
+  (let [dir (scratch-repo!)]
+    (fails-with dir ["status" "--json" "-js"] "unknown option: -js")
+    (fails-with dir ["--reviewer=me" "-r"] "unknown option: -r")))
 
 (deftest a-value-option-refuses-an-empty-value
   (let [dir (scratch-repo!)]

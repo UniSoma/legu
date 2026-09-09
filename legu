@@ -3,7 +3,8 @@
 ;; Depends on babashka 1.13.220 or newer and git. Nothing else.
 
 (ns legu.main
-  (:require [babashka.fs :as fs]
+  (:require [babashka.cli :as cli]
+            [babashka.fs :as fs]
             [babashka.process :as p]
             [cheshire.core :as json]
             [clojure.edn :as edn]
@@ -1225,77 +1226,149 @@
 
 ;; ---------------------------------------------------------------- cli
 
-(def usage
-  (str/join "\n"
-            ["legu — human review coverage"
-             ""
-             "  legu mark <path>[:<start>-<end>]     mark a region reviewed at HEAD"
-             "  legu ticket <path>[:<range>] <id>    anchor a ticket reference"
-             "  legu forget <path>[:<range>]         drop a region's review state"
-             "  legu status [<path>] [--gaps]        per-file review state"
-             "  legu regions <path>                  anchored records for one file"
-             "  legu stale                           regions needing a re-read"
-             "  legu next [--limit N] [--order O]    what to read next"
-             "  legu coverage                        never-read / reviewed / stale"
-             ""
-             "  --json             machine-readable output"
-             "  --version          this legu's version and the store schema it writes"
-             "  --reviewer <name>  who read it (default: git config user.name)"
-             "  --limit <n>        how many files `next` suggests"
-             "  --order <o>        `next` order: dir (default) or cochange"
-             "  --gaps             hide files read in full from `status`"]))
-
-;; A set of strings is a flag taking one of a fixed set of values; the set is
-;; also what the error names when the value is not one of them.
-(def flags {"--json" :flag "--help" :flag "--gaps" :flag "--version" :flag
-            "--reviewer" :value "--limit" :int
-            "--order" #{"dir" "cochange"}})
-
-(defn parse-args
-  "Options may appear anywhere. Anything unrecognized is an error, never a
-   silently swallowed argument."
-  [argv]
-  (loop [argv (seq argv) opts {} args []]
-    (if-not argv
-      {:opts opts :args args}
-      (let [a (first argv) more (rest argv)]
-        (cond
-          (= a "--") {:opts opts :args (into args more)}
-          (= a "-h") (recur (seq more) (assoc opts :help true) args)
-
-          (str/starts-with? a "--")
-          (let [i (str/index-of a "=")
-                k (if i (subs a 0 i) a)
-                inline (when i (subs a (inc i)))
-                kw (keyword (subs k 2))
-                t (get flags k)]
-            (case (if (set? t) :enum t)
-              :flag (recur (seq more) (assoc opts kw (not= "false" inline)) args)
-              :value (let [v (or inline (first more))]
-                       (when (str/blank? v) (die (str k " needs a value")))
-                       (recur (seq (if inline more (rest more))) (assoc opts kw v) args))
-              :enum (let [v (or inline (first more))]
-                      (when-not (t v)
-                        (die (str k " expects one of " (str/join ", " (sort t)))))
-                      (recur (seq (if inline more (rest more))) (assoc opts kw v) args))
-              :int (let [v (or inline (first more))
-                         n (parse-long (str v))]
-                     (when-not (and n (pos? n))
-                       (die (str k " expects a positive integer")))
-                     (recur (seq (if inline more (rest more))) (assoc opts kw n) args))
-              (die (str "unknown option: " k))))
-
-          (and (str/starts-with? a "-") (not= a "-"))
-          (die (str "unknown option: " a))
-
-          :else (recur (seq more) opts (conj args a)))))))
+(def options
+  "Every option legu takes, declared once at the dispatch level. Declaring them
+   there is what lets each one stand on either side of the command, as they
+   always have; scoping them to the commands that read them is
+   lgu-01m238wskh6s."
+  {:json {:coerce :boolean :desc "machine-readable output"}
+   :version {:coerce :boolean :desc "this legu's version and the store schema it writes"}
+   :help {:coerce :boolean :alias :h :desc "this help"}
+   :reviewer {:validate #(and (string? %) (not (str/blank? %)))
+              :desc "who read it (default: git config user.name)"}
+   ;; parse-long rather than :coerce :long, so a value that is not a number
+   ;; reaches :validate instead of failing in the library's words inside the
+   ;; coercion.
+   :limit {:coerce #(parse-long (str %)) :validate #(and (int? %) (pos? %))
+           :desc "how many files `next` suggests"}
+   :order {:enum ["dir" "cochange"] :desc "`next` order (default: dir)"}
+   :gaps {:coerce :boolean :desc "hide files read in full from `status`"}})
 
 (def commands
-  {"mark" {:fn cmd-mark :max 1} "ticket" {:fn cmd-ticket :max 2}
-   "forget" {:fn cmd-forget :max 1} "status" {:fn cmd-status :max 1}
-   "regions" {:fn cmd-regions :max 1}
-   "stale" {:fn cmd-stale :max 0} "next" {:fn cmd-next :max 0}
-   "coverage" {:fn cmd-coverage :max 0}})
+  "One entry per command. :doc is both its line in `legu --help` and the
+   description in its own help; :arguments names the arguments it takes, in
+   order, and its length is the count checked before the command runs."
+  [{:cmds ["mark"] :run cmd-mark :arguments [:target]
+    :doc "mark a region reviewed at HEAD"}
+   {:cmds ["ticket"] :run cmd-ticket :arguments [:target :id]
+    :doc "anchor a ticket reference"}
+   {:cmds ["forget"] :run cmd-forget :arguments [:target]
+    :doc "drop a region's review state"}
+   {:cmds ["status"] :run cmd-status :arguments [:path]
+    :doc "per-file review state"}
+   {:cmds ["regions"] :run cmd-regions :arguments [:path]
+    :doc "anchored records for one file"}
+   {:cmds ["stale"] :run cmd-stale :arguments []
+    :doc "regions needing a re-read"}
+   {:cmds ["next"] :run cmd-next :arguments []
+    :doc "what to read next"}
+   {:cmds ["coverage"] :run cmd-coverage :arguments []
+    :doc "never-read / reviewed / stale"}])
+
+(def argument-descriptions
+  "What each argument is called in help. The keys are shared across commands
+   because the argument means the same thing wherever it appears."
+  {:target "path[:<start>-<end>]"
+   :id "the ticket's id in its own tracker"
+   :path "limit to this file or directory"})
+
+(defn argument-spec
+  "The spec entries for a command's arguments. :positional both puts them under
+   Arguments: in help and refuses them as flags, so `legu mark --target x` is
+   the unknown option it has always been."
+  [arguments]
+  (into {} (for [a arguments]
+             [a {:positional true :desc (argument-descriptions a)}])))
+
+(defn usage
+  "legu's own help, generated from the table the parser reads. The first line
+   is legu's own, because babashka.cli's help starts at Usage:."
+  []
+  (str "legu — human review coverage\n\n"
+       (cli/format-command-help {:table commands :prog "legu" :spec options})))
+
+(defn command-help
+  "The help for one command. babashka.cli renders a command's own page from an
+   entry that names no command, under a prog that does."
+  [cmds doc arguments]
+  (cli/format-command-help {:table [{:cmds [] :doc doc :spec (argument-spec arguments)}]
+                            :prog (str/join " " (cons "legu" cmds))
+                            :spec options}))
+
+(defn print-version [opts]
+  (emit opts {:version VERSION :schema sidecar-schema}
+        (fn [{:keys [version schema]}]
+          (println (str "legu " version " (store schema " schema ")")))))
+
+(defn dispatch-entry
+  "A command's entry in the dispatch tree. --version and --help are answered
+   here, in the order the parser they replace answered them: --version wins."
+  [{:keys [cmds run arguments doc]}]
+  {:cmds cmds
+   :doc doc
+   ;; No option belongs to one command yet, so this refuses only spellings legu
+   ;; has never had.
+   :restrict true
+   ;; babashka.cli stops reading options at the first argument no key claims,
+   ;; so `legu mark <target> --reviewer NAME` reaches --reviewer only once
+   ;; <target> has a key. The values go straight back into :args; reading them
+   ;; from opts, and requiring them there, is lgu-01m238wskh6s.
+   :args->opts arguments
+   :spec (argument-spec arguments)
+   :fn (fn [{:keys [opts args]}]
+         (let [args (into (vec (take-while some? (map opts arguments))) args)
+               opts (apply dissoc opts arguments)
+               takes (count arguments)]
+           (cond
+             (:version opts) (print-version opts)
+             (:help opts) (println (command-help cmds doc arguments))
+             :else (do
+                     (when (> (count args) takes)
+                       (die (str (first cmds) " takes " takes " argument"
+                                 (if (= 1 takes) "" "s") ", got " (count args))))
+                     (run {:args args :opts opts})))))})
+
+(def dispatch-table
+  (conj (mapv dispatch-entry commands)
+        {:cmds []
+         :restrict true
+         ;; Without this a word that names no command is read as one of legu's
+         ;; own arguments and the run exits 0.
+         :restrict-args true
+         :fn (fn [{:keys [opts]}]
+               (if (:version opts) (print-version opts) (println (usage))))}))
+
+(def option-message
+  "What legu says when an option's value is wrong. babashka.cli reports a
+   missing value before it coerces one, so this cannot live in :validate alone.
+   --order reads its values back out of the spec rather than repeating them:
+   two lists of the orders that had to agree by hand is the drift this move
+   set out to end."
+  {:limit "--limit expects a positive integer"
+   :order (str "--order expects one of "
+               (str/join ", " (sort (:enum (:order options)))))
+   :reviewer "--reviewer needs a value"})
+
+(defn typed-flag
+  "The token the reader typed for flag. babashka.cli splits a single-dash token
+   into one-character flags, so the path -weird.txt is reported as -w."
+  [flag argv]
+  (-> (or (first (filter #(str/starts-with? % flag) argv)) flag)
+      (str/split #"=" 2)
+      first))
+
+(defn parse-error
+  "legu's wording for a parse failure, so every one still reaches the reader
+   through die. Two causes are reworded rather than passed through: the library
+   names the token it could not place, legu names what the token was meant
+   to be."
+  [argv]
+  (fn [{:keys [cause msg option flag value]}]
+    (die (or (when (#{:coerce :validate} cause) (option-message option))
+             (case cause
+               :restrict (str "unknown option: " (typed-flag flag argv))
+               :restrict-args (str "unknown command: " value)
+               msg)))))
 
 (defn find-root
   "The git top level, else the nearest ancestor holding a .review/ store, else
@@ -1313,24 +1386,8 @@
     (die message))
   (binding [*root* (find-root)
             *git?* (some? (git-toplevel))]
-    (let [{:keys [opts args]} (parse-args argv)
-          [cmd & rest-args] args]
-      (cond
-        (:version opts)
-        (emit opts {:version VERSION :schema sidecar-schema}
-              (fn [{:keys [version schema]}]
-                (println (str "legu " version " (store schema " schema ")"))))
-
-        (or (:help opts) (nil? cmd)) (println usage)
-
-        (contains? commands cmd)
-        (let [{:keys [fn max]} (commands cmd)]
-          (when (> (count rest-args) max)
-            (die (str cmd " takes " max " argument" (if (= 1 max) "" "s")
-                      ", got " (count rest-args))))
-          (fn {:args (vec rest-args) :opts opts}))
-
-        :else (die (str "unknown command: " cmd))))))
+    (cli/dispatch dispatch-table argv
+                  {:prog "legu" :spec options :error-fn (parse-error argv)})))
 
 ;; The CLI suite loads this file to call the version comparison directly: no
 ;; subprocess can reach it, since that would need a babashka installed at each
