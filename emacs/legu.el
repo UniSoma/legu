@@ -914,6 +914,8 @@ generation is not bumped: the next real snapshot replaces this wholesale."
 (defvar-local legu--hidden nil)
 (defvar-local legu--content-seen nil
   "Cons of (HASH . TIME) recording when this content was first seen here.")
+(defvar-local legu--regions-request 0
+  "Generation of the newest `legu-describe-region' request in this buffer.")
 
 (defvar legu--nudged nil
   "Whether the region-size nudge has already fired this session.")
@@ -1384,23 +1386,80 @@ WHAT names the thing for the error message."
         (find-file (expand-file-name (plist-get row :path) root))
         (when ranges (goto-char (legu--line-position (car (car ranges)))))))))
 
+(defun legu--current-anchor-covers-p (anchor line)
+  "Return non-nil when current ANCHOR covers LINE.
+Opaque anchors cover their whole file."
+  (let ((start (alist-get 'start anchor)) (end (alist-get 'end anchor)))
+    (or (and (null start) (null end) (alist-get 'opaque anchor))
+        (and start end (<= start line) (<= line end)))))
+
+(defun legu--describe-anchor (path anchor)
+  "Return the provenance of current ANCHOR in PATH."
+  (let* ((original (alist-get 'original anchor))
+         (commit (or (alist-get 'commit original) "?"))
+         (current (if (alist-get 'start anchor)
+                      (format "%s:%s-%s" path
+                              (alist-get 'start anchor) (alist-get 'end anchor))
+                    path))
+         (recorded (if (alist-get 'start original)
+                       (format "%s:%s-%s" (alist-get 'path original)
+                               (alist-get 'start original) (alist-get 'end original))
+                     (or (alist-get 'path original) path))))
+    (format "%s %s%s; recorded %s, reviewed at %s by %s, commit %s"
+            current
+            (or (alist-get 'state anchor) "unknown")
+            (if-let* ((reason (alist-get 'reason anchor)))
+                (format " (%s)" reason)
+              "")
+            recorded
+            (or (alist-get 'timestamp original) "?")
+            (or (alist-get 'reviewer original) "?")
+            (substring commit 0 (min 8 (length commit))))))
+
+(defun legu--describe-regions-answer (line answer)
+  "Render a parsed regions ANSWER for LINE into one echo-area string."
+  (let* ((path (alist-get 'path answer))
+         (records (seq-filter (lambda (r) (legu--current-anchor-covers-p r line))
+                              (alist-get 'regions answer)))
+         (tickets (seq-filter (lambda (r) (legu--current-anchor-covers-p r line))
+                              (alist-get 'tickets answer)))
+         (parts (mapcar (lambda (r) (legu--describe-anchor path r)) records))
+         (ticket-ids (mapcar (lambda (r) (alist-get 'ticket r)) tickets)))
+    (unless parts
+      (setq parts (list (format "%s:%d unreviewed" path line))))
+    (when ticket-ids
+      (setq parts (append parts
+                          (list (format "tickets [%s]"
+                                        (mapconcat #'identity ticket-ids " "))))))
+    (unless (alist-get 'complete answer)
+      (setq parts (append parts (list "review state incomplete"))))
+    (concat "legu: " (string-join parts "\n"))))
+
 (defun legu-describe-region ()
-  "Echo the provenance of the region at point."
+  "Query and echo current anchors, provenance and tickets at point."
   (interactive)
-  (let* ((line (legu--line-number))
-         (record (legu-region-record-at legu--root legu--relpath line))
-         (tickets (legu-tickets-at legu--root legu--relpath line))
-         (suffix (if tickets (format "  [%s]" (mapconcat #'identity tickets " ")) "")))
-    (if (null record)
-        (message "legu: line %d has never been marked read%s" line suffix)
-      (message "legu: %s:%s-%s  read %s by %s at %s%s"
-               legu--relpath (alist-get 'start record) (alist-get 'end record)
-               (substring (or (alist-get 'timestamp record) "?") 0
-                          (min 10 (length (or (alist-get 'timestamp record) "?"))))
-               (or (alist-get 'reviewer record) "?")
-               (substring (or (alist-get 'commit record) "?") 0
-                          (min 8 (length (or (alist-get 'commit record) "?"))))
-               suffix))))
+  (unless (and legu--root legu--relpath buffer-file-name)
+    (user-error "legu: not visiting a file in a legu repository"))
+  (when (buffer-modified-p)
+    (user-error "legu: save the buffer before describing its review state"))
+  (let* ((buffer (current-buffer))
+         (root legu--root)
+         (path legu--relpath)
+         (line (legu--line-number))
+         (tick (buffer-chars-modified-tick))
+         (request (setq legu--regions-request (1+ legu--regions-request))))
+    (legu--run
+     root (list "regions" path "--json")
+     (lambda (status stdout stderr)
+       (when (and (buffer-live-p buffer)
+                  (with-current-buffer buffer
+                    (and (= request legu--regions-request)
+                         (= tick (buffer-chars-modified-tick)))))
+         (if (eq status 'ok)
+             (if-let* ((answer (legu--parse-json stdout)))
+                 (message "%s" (legu--describe-regions-answer line answer))
+               (message "legu: invalid regions response"))
+           (message "%s" (string-trim stderr))))))))
 
 (defun legu-visit-ticket ()
   "Visit the ticket anchored at point."

@@ -62,7 +62,7 @@ is on.
 | `n` `p` | `legu-next-gap` `legu-previous-gap` | next unreviewed or stale line here |
 | `]` `[` | `legu-next-stale` `legu-previous-stale` | next stale region here |
 | `s` | `legu-diff-stale` | what changed since I read it (`C-u` for ediff) |
-| `.` | `legu-describe-region` | who read this, when, at which commit |
+| `.` | `legu-describe-region` | current state, provenance and tickets at point |
 | `t` `T` | `legu-ticket` `legu-visit-ticket` | anchor / open a ticket id |
 | `k` | `legu-forget` | drop this region's state |
 | `l` `J` | `legu-list` `legu-next-file` | the queue / straight to the next file |
@@ -128,6 +128,12 @@ numbers, not a score. `legu-dired-column` set to nil turns it off.
 Three tiers, with one rule binding them: **local computation may confirm
 "read, in place"; it may never pronounce "stale", "moved" or "missing".**
 Those verdicts come only from the CLI.
+
+`legu-describe-region` runs `legu regions` for the saved file. It reports every
+overlapping review record at point, with each record's current state, reason,
+recorded location, reviewer, timestamp and commit. It also reports independent
+ticket references at point. A buffer edit or a newer describe request discards
+an older asynchronous answer.
 
 1. **The sidecar and a file hash.** Opening a file reads
    `.review/<path>.edn` and hashes the file — no subprocess at all. A record
@@ -263,7 +269,7 @@ the mark it produced.
 emacs -Q --batch -L . -l legu-tests.el -f ert-run-tests-batch-and-exit
 ```
 
-93 tests. The pure half covers range arithmetic, the EDN reader, the derived
+107 tests. The pure half covers range arithmetic, the EDN reader, the derived
 coverage numbers, the dired column's sums and formatting, painting
 precedence and the overlay lifecycle. The other
 half drives the real `legu` binary against real scratch git repositories —

@@ -28,6 +28,7 @@ legu mark src/core.clj                 # the whole file
 legu ticket src/core.clj:40-95 lgu-01k7  # anchor a ticket reference to a region
 legu forget src/core.clj:40-95         # drop that region's state
 legu status [<path>]                   # per-file state, for a file or a subtree
+legu regions src/core.clj              # current anchors and their provenance
 legu stale                             # regions that need a re-read
 legu next --limit 20                   # what to read next
 legu coverage                          # the three numbers
@@ -89,6 +90,71 @@ move: conservative in the direction that asks for a re-read.
 Files are read as bytes and decoded latin-1, so a change to a non-UTF-8 byte is
 still a change. State is measured against the **working tree**, not against
 HEAD, so an uncommitted edit shows up as stale immediately.
+
+## Inspect one file
+
+`legu regions <path>` resolves the review records and ticket references that
+currently anchor in one file. Editors can use it without computing coverage
+for the rest of the repository.
+
+```json
+{
+  "path": "src/core.clj",
+  "eligible": true,
+  "condition": "present",
+  "total": 169,
+  "opaque": false,
+  "complete": true,
+  "regions": [{
+    "start": 40,
+    "end": 95,
+    "state": "reviewed",
+    "reason": null,
+    "moved": true,
+    "opaque": false,
+    "original": {
+      "path": "src/old-core.clj",
+      "start": 38,
+      "end": 93,
+      "commit": "a1b2c3...",
+      "reviewer": "Ada",
+      "timestamp": "2026-08-28T01:00:00Z"
+    }
+  }],
+  "tickets": [{
+    "start": 52,
+    "end": 52,
+    "state": "reviewed",
+    "reason": null,
+    "moved": false,
+    "opaque": false,
+    "ticket": "lgu-01k7",
+    "original": {
+      "path": "src/core.clj",
+      "start": 52,
+      "end": 52,
+      "commit": "a1b2c3...",
+      "timestamp": "2026-08-28T01:00:00Z"
+    }
+  }]
+}
+```
+
+Current `start` and `end` values are null when a record is missing. The
+`original` object retains its recorded bounds. Overlapping review records stay
+separate, and lines outside the returned records are unreviewed.
+
+Text and binary files use `condition: "present"`. Missing and unreadable files
+use their condition name and report `total: 0`. Empty and binary files have
+`total: 1`, `opaque: true`, and null bounds. A tracked missing or unreadable
+file remains eligible. An existing ignored or untracked file has
+`eligible: false` and an `exclusion-reason`, but still returns its records.
+
+An unreadable sidecar makes `complete` false. The command still exits 0, lists
+the sidecar under repository-relative `errors`, and writes the warning to
+stderr. A directory, a path outside the repository, or an unknown missing path
+is an error. Without `--json`, the command prints the same anchors, states,
+reasons, provenance, ticket references, and completeness.
 
 ## Emacs
 

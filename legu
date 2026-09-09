@@ -720,6 +720,136 @@
       (= path prefix)
       (str/starts-with? path (str prefix "/"))))
 
+(defn- record-may-answer-path?
+  "Return true when `record` stored under `stored-path` can anchor at `path`."
+  [path stored-path record]
+  (or (= path stored-path)
+      (let [gone? (not (#{:text :binary} (:kind (read-worktree stored-path))))
+            {:keys [renamed added]} (candidate-paths (:commit record) stored-path gone?)]
+        (boolean (some #{path} (concat renamed added))))))
+
+(defn- records-answering-path
+  "Return readable records that anchor at `path`.
+   Reads every sidecar so `emit` can report an incomplete answer."
+  [path kind]
+  (vec
+   (for [stored-path (stored-paths)
+         :let [state (read-state stored-path)]
+         record (kind state)
+         :when (record-may-answer-path? path stored-path record)
+         :let [stored (assoc record :path stored-path)
+               current (resolve-region stored)]
+         :when (= path (:path current))]
+     {:stored stored :current current})))
+
+(defn- original-provenance [record]
+  (cond-> (select-keys record [:path :start :end :commit :timestamp])
+    (contains? record :reviewer) (assoc :reviewer (:reviewer record))))
+
+(defn- current-record
+  [{:keys [stored current]}]
+  (let [anchored? (not= :missing (:state current))]
+    (cond-> {:start (when anchored? (:start current))
+             :end (when anchored? (:end current))
+             :state (name (:state current))
+             :reason (:reason current)
+             :moved (boolean (:moved? current))
+             :opaque (boolean (:opaque stored))
+             :original (original-provenance stored)}
+      (contains? stored :ticket) (assoc :ticket (:ticket stored)))))
+
+(defn- path-eligibility [path ignored]
+  (cond
+    (= path ".reviewignore") [false "legu metadata"]
+    (str/starts-with? path ".review/") [false "legu metadata"]
+    (ignored path) [false "excluded by .reviewignore"]
+    (and *git?* (not ((tracked-set) path))) [false "not tracked by git"]
+    :else [true nil]))
+
+(defn- render-current-record [path record]
+  (let [original (:original record)
+        where (str path (fmt-region record))
+        source (str (:path original) (fmt-region original))
+        moved (when (not= where source) (str " from " source))]
+    (println
+     (format "  %-28s %-8s%s%s  reviewed at %s by %s, commit %s"
+             where (:state record)
+             (if-let [reason (:reason record)] (str " (" reason ")") "")
+             (or moved "")
+             (or (:timestamp original) "?")
+             (or (:reviewer original) "?")
+             (or (:commit original) "?")))))
+
+(defn- render-current-ticket [path ticket]
+  (let [original (:original ticket)
+        source (str (:path original) (fmt-region original))]
+    (println
+     (format "    %s%s  %s  [%s]%s; recorded %s, anchored %s at %s"
+             path (fmt-region ticket) (:ticket ticket) (:state ticket)
+             (if-let [reason (:reason ticket)] (str " (" reason ")") "")
+             source
+             (or (:timestamp original) "?")
+             (or (:commit original) "?")))))
+
+(defn cmd-regions [{:keys [args opts]}]
+  (when-not (first args) (die "regions needs a path"))
+  (let [path (rel-path (first args))
+        file (fs/file *root* path)]
+    (when (fs/directory? file) (die (str "path is a directory: " path)))
+    (let [cur (read-worktree path)
+          review-records (records-answering-path path :regions)
+          tickets (records-answering-path path :tickets)
+          known? (or (not= :missing (:kind cur))
+                     ((tracked-set) path)
+                     (some #(= path %) (stored-paths)))]
+      (when-not known? (die (str "no such file: " path)))
+      (let [ignored (ignored-files)
+            [eligible exclusion] (path-eligibility path ignored)
+            condition (name (:kind cur))
+            total (case (:kind cur)
+                    :text (max 1 (count (:lines cur)))
+                    :binary 1
+                    0)
+            opaque (or (= :binary (:kind cur))
+                       (and (= :text (:kind cur)) (empty? (:lines cur))))
+            regions (->> review-records
+                         (map current-record)
+                         (sort-by (juxt #(or (:start %) 0)
+                                        #(get-in % [:original :timestamp])))
+                         vec)
+            ticket-refs (->> tickets
+                             (map current-record)
+                             (sort-by (juxt #(or (:start %) 0) :ticket))
+                             vec)
+            data (cond-> {:path path
+                          :eligible eligible
+                          :condition (case condition
+                                       "text" "present"
+                                       "binary" "present"
+                                       condition)
+                          :total total
+                          :opaque opaque
+                          :complete (empty? @store-errors)
+                          :regions regions
+                          :tickets ticket-refs}
+                   exclusion (assoc :exclusion-reason exclusion))]
+        (emit opts data
+              (fn [answer]
+                (println
+                 (str (:path answer) ": " (:condition answer)
+                      ", " (if (:eligible answer) "eligible" (:exclusion-reason answer))
+                      ", " (:total answer) (if (= 1 (:total answer)) " line" " lines")
+                      (when (:opaque answer) ", opaque")
+                      (when-not (:complete answer) ", incomplete")))
+                (if (empty? (:regions answer))
+                  (println "  no review records")
+                  (doseq [record (:regions answer)]
+                    (render-current-record path record)))
+                (when (seq (:tickets answer))
+                  (println "  tickets")
+                  (doseq [ticket (:tickets answer)]
+                    (render-current-ticket path ticket)))))))))
+
 (defn cmd-status [{:keys [args opts]}]
   (let [prefix (some-> (first args) (str/replace #"/$" "") rel-path)
         by-path (resolved-by-path)
@@ -824,6 +954,7 @@
              "  legu ticket <path>[:<range>] <id>    anchor a ticket reference"
              "  legu forget <path>[:<range>]         drop a region's review state"
              "  legu status [<path>]                 per-file review state"
+             "  legu regions <path>                  anchored records for one file"
              "  legu stale                           regions needing a re-read"
              "  legu next [--limit N]                what to read next"
              "  legu coverage                        never-read / reviewed / stale"
@@ -871,6 +1002,7 @@
 (def commands
   {"mark" {:fn cmd-mark :max 1} "ticket" {:fn cmd-ticket :max 2}
    "forget" {:fn cmd-forget :max 1} "status" {:fn cmd-status :max 1}
+   "regions" {:fn cmd-regions :max 1}
    "stale" {:fn cmd-stale :max 0} "next" {:fn cmd-next :max 0}
    "coverage" {:fn cmd-coverage :max 0}})
 
