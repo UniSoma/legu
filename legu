@@ -546,6 +546,55 @@
       (println (json/generate-string data {:pretty true}))
       (render data))))
 
+;; ---------------------------------------------------------------- terminal
+
+(def ^:private ansi
+  {:dim "[2m" :bold "[1m" :green "[32m" :yellow "[33m"
+   :reset "[0m"})
+
+(defn tty?
+  "Whether a person is reading stdout. A pipe gets plain text."
+  []
+  (some? (System/console)))
+
+(defn color? []
+  (and (tty?) (nil? (System/getenv "NO_COLOR"))))
+
+(defn paint [code s]
+  (if (and code (color?)) (str (ansi code) s (ansi :reset)) s))
+
+(defn terminal-width []
+  (or (some-> (System/getenv "COLUMNS") parse-long)
+      (when (tty?)
+        (let [{:keys [exit out]} (p/sh {:out :string :err :string :continue true} "tput" "cols")]
+          (when (zero? exit) (parse-long (str/trim out)))))
+      80))
+
+(defn bar
+  "A bar FRACTION of WIDTH long. Anything too small for one cell still shows
+   as a sliver, so a repository with a few lines read does not look like one
+   with none."
+  [fraction width]
+  (let [n (Math/round (* fraction width))]
+    (cond (pos? n) (apply str (repeat n "█"))
+          (pos? fraction) "▏"
+          :else "")))
+
+(defn percent
+  "FRACTION as a percentage that never rounds a few lines to nothing."
+  [fraction]
+  (let [pct (* 100.0 fraction)]
+    (cond (and (pos? pct) (< pct 0.05)) " <0.1%"
+          (and (< pct 100) (> pct 99.95)) ">99.9%"
+          :else (format "%5.1f%%" pct))))
+
+(defn shorten-path
+  "PATH cut from the left to fit WIDTH, so the file name always survives."
+  [path width]
+  (if (> (count path) width)
+    (str "…" (subs path (- (count path) (dec width))))
+    path))
+
 ;; ---------------------------------------------------------------- commands
 
 (defn region-of
@@ -850,18 +899,90 @@
                   (doseq [ticket (:tickets answer)]
                     (render-current-ticket path ticket)))))))))
 
+(defn render-coverage
+  "The three numbers of the scope, as three rows on one bar scale. Never one
+   number: the stale row says whether the reader is gaining ground."
+  [{:keys [files lines unreviewed reviewed stale]} scope]
+  (let [denominator (max 1 lines)
+        width (max 8 (min 40 (- (terminal-width) 34)))]
+    (println)
+    (doseq [[label n code] [["never read" unreviewed :dim]
+                            ["read" reviewed :green]
+                            ["stale" stale :yellow]]]
+      (let [fraction (/ (double n) denominator)]
+        (println (str "  " (paint code (format "%-12s" label))
+                      (format "%8d  " n)
+                      (paint (when (zero? n) :dim) (percent fraction))
+                      "  " (paint code (bar fraction width))))))
+    (println (paint :dim (str "  " (format "%-12s" "eligible")
+                              files (if (= 1 files) " file" " files")
+                              " · " lines (if (= 1 lines) " line" " lines")
+                              (when scope (str " · under " scope)))))))
+
+(defn render-files [files hidden]
+  (println)
+  (println (str (paint :bold "FILES") "  "
+                (paint :dim (str (count (remove :read-in-full files)) " with gaps · "
+                                 (+ hidden (count (filter :read-in-full files)))
+                                 " read in full"
+                                 (when (pos? hidden) " (hidden)")))))
+  (when (seq files)
+    (let [longest (apply max 0 (map (comp count :path) files))
+          path-width (min 60 (max 20 longest))
+          digits (max 5 (count (str (apply max 0 (map :total files)))))
+          num (fn [n] (format (str "%" digits "d") n))
+          cell (fn [n code] (paint (if (zero? n) :dim code) (num n)))]
+      (println (paint :dim (str "  " (format (str "%-" path-width "s") "PATH")
+                                "  " (format (str "%" digits "s") "READ")
+                                "  " (format (str "%" digits "s") "STALE")
+                                "  " (format (str "%" digits "s") "UNREAD")
+                                "  " (format (str "%" digits "s") "TOTAL")
+                                "  READ RANGES")))
+      (doseq [f files]
+        (println (str "  " (format (str "%-" path-width "s") (shorten-path (:path f) path-width))
+                      "  " (cell (:reviewed f) :green)
+                      "  " (cell (:stale f) :yellow)
+                      "  " (cell (:unreviewed f) nil)
+                      "  " (num (:total f))
+                      "  " (cond (:read-in-full f) (paint :dim "read in full")
+                                 (empty? (:reviewed-lines f)) (paint :dim "none")
+                                 :else (fmt-ranges (:reviewed-lines f)))))))))
+
+(defn render-tickets [tickets]
+  (when (seq tickets)
+    (println)
+    (println (str (paint :bold "TICKETS") "  " (paint :dim (str (count tickets)))))
+    (let [longest (apply max 0 (map #(count (str (:path %) (fmt-region %))) tickets))
+          width (min 60 (max 20 longest))]
+      (doseq [t tickets]
+        (println (str "  " (format (str "%-" width "s")
+                                   (shorten-path (str (:path t) (fmt-region t)) width))
+                      "  " (:ticket t)
+                      "  " (paint (case (:state t) :stale :yellow :reviewed :green :dim)
+                                  (name (:state t)))))))))
+
 (defn cmd-status [{:keys [args opts]}]
   (let [prefix (some-> (first args) (str/replace #"/$" "") rel-path)
+        scope (when (and prefix (not= prefix ".")) prefix)
         by-path (resolved-by-path)
-        files (->> (eligible-files)
-                   (filter #(under? (:path %) prefix))
-                   (map #(file-coverage by-path %))
-                   (sort-by :path))
+        all-files (->> (eligible-files)
+                       (filter #(under? (:path %) prefix))
+                       (map #(file-coverage by-path %))
+                       (map #(assoc % :read-in-full (= (:reviewed %) (:total %))))
+                       (sort-by :path))
+        files (if (:gaps opts) (remove :read-in-full all-files) all-files)
+        hidden (- (count all-files) (count files))
+        coverage {:files (count all-files)
+                  :lines (reduce + 0 (map :total all-files))
+                  :unreviewed (reduce + 0 (map :unreviewed all-files))
+                  :reviewed (reduce + 0 (map :reviewed all-files))
+                  :stale (reduce + 0 (map :stale all-files))}
         tickets (->> (ticket-records)
                      (map (fn [t] (assoc (resolve-region t) :ticket (:ticket t))))
                      (filter #(under? (:path %) prefix))
                      (sort-by (juxt :path #(or (:start %) 0))))
-        data {:files (mapv #(-> (dissoc % :reviewed-lines :stale-lines)
+        data {:coverage coverage
+              :files (mapv #(-> (dissoc % :reviewed-lines :stale-lines :read-in-full)
                                 (assoc :ranges (fmt-ranges (:reviewed-lines %))))
                            files)
               :tickets (mapv #(-> (select-keys % [:path :start :end :ticket])
@@ -869,22 +990,11 @@
                              tickets)}]
     (emit opts data
           (fn [_]
-            (if (empty? files)
-              (println "no eligible files")
-              (do
-                (println (format "%-52s %6s %6s %6s  %s"
-                                 "FILE" "REV" "STALE" "TOTAL" "REVIEWED"))
-                (doseq [f files]
-                  (println (format "%-52s %6d %6d %6d  %s"
-                                   (:path f) (:reviewed f) (:stale f) (:total f)
-                                   (fmt-ranges (:reviewed-lines f)))))))
-            (when (seq tickets)
-              (println)
-              (println "TICKETS")
-              (doseq [t tickets]
-                (println (format "  %s%s  %s  [%s]"
-                                 (:path t) (fmt-region t)
-                                 (:ticket t) (name (:state t))))))))))
+            (if (empty? all-files)
+              (println (str "no eligible files" (when scope (str " under " scope))))
+              (do (render-coverage coverage scope)
+                  (render-files files hidden)))
+            (render-tickets tickets)))))
 
 (defn cmd-stale [{:keys [opts]}]
   (let [rs (->> (records)
@@ -953,7 +1063,7 @@
              "  legu mark <path>[:<start>-<end>]     mark a region reviewed at HEAD"
              "  legu ticket <path>[:<range>] <id>    anchor a ticket reference"
              "  legu forget <path>[:<range>]         drop a region's review state"
-             "  legu status [<path>]                 per-file review state"
+             "  legu status [<path>] [--gaps]        per-file review state"
              "  legu regions <path>                  anchored records for one file"
              "  legu stale                           regions needing a re-read"
              "  legu next [--limit N]                what to read next"
@@ -961,9 +1071,11 @@
              ""
              "  --json             machine-readable output"
              "  --reviewer <name>  who read it (default: git config user.name)"
-             "  --limit <n>        how many files `next` suggests"]))
+             "  --limit <n>        how many files `next` suggests"
+             "  --gaps             hide files read in full from `status`"]))
 
-(def flags {"--json" :flag "--help" :flag "--reviewer" :value "--limit" :int})
+(def flags {"--json" :flag "--help" :flag "--gaps" :flag
+            "--reviewer" :value "--limit" :int})
 
 (defn parse-args
   "Options may appear anywhere. Anything unrecognized is an error, never a

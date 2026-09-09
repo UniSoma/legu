@@ -27,7 +27,7 @@ legu mark src/core.clj:40-95           # mark a region reviewed at HEAD
 legu mark src/core.clj                 # the whole file
 legu ticket src/core.clj:40-95 lgu-01k7  # anchor a ticket reference to a region
 legu forget src/core.clj:40-95         # drop that region's state
-legu status [<path>]                   # per-file state, for a file or a subtree
+legu status [<path>] [--gaps]          # the three numbers, then per-file state
 legu regions src/core.clj              # current anchors and their provenance
 legu stale                             # regions that need a re-read
 legu next --limit 20                   # what to read next
@@ -40,6 +40,7 @@ rather than a silently swallowed argument:
 - `--json` — machine-readable output
 - `--reviewer <name>` — defaults to `git config user.name`
 - `--limit <n>` — how many files `next` suggests
+- `--gaps` — `status` lists only files with something left to read
 - `--help`
 
 ## How staleness works
