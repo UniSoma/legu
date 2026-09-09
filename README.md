@@ -30,7 +30,8 @@ legu forget src/core.clj:40-95         # drop that region's state
 legu status [<path>] [--gaps]          # the three numbers, then per-file state
 legu regions src/core.clj              # current anchors and their provenance
 legu stale                             # regions that need a re-read
-legu next --limit 20                   # what to read next
+legu next --limit 20                   # what to read next, in directory order
+legu next --order cochange             # ...ordered by what changes with what you read
 legu coverage                          # the three numbers
 ```
 
@@ -40,6 +41,7 @@ rather than a silently swallowed argument:
 - `--json` — machine-readable output
 - `--reviewer <name>` — defaults to `git config user.name`
 - `--limit <n>` — how many files `next` suggests
+- `--order <dir|cochange>` — which question `next` answers (below)
 - `--gaps` — `status` lists only files with something left to read
 - `--help`
 - `--version` — the version and the store schema (the `:schema` every sidecar
@@ -105,6 +107,43 @@ move: conservative in the direction that asks for a re-read.
 Files are read as bytes and decoded latin-1, so a change to a non-UTF-8 byte is
 still a change. State is measured against the **working tree**, not against
 HEAD, so an uncommitted edit shows up as stale immediately.
+
+## What to read next
+
+`legu next` lists the files with something left to read. The two orderings
+answer different questions, and the default is `dir`:
+
+```
+legu next                    # same as --order dir
+legu next --order cochange
+```
+
+**`dir`** walks the tree in directory order, which keeps a reader inside one
+part of the codebase for a sitting. Reach for it when you are reading a
+subsystem through, or when you want the queue to be the same every time —
+it depends on nothing but the tree, so it is stable and it works without git.
+
+**`cochange`** answers "given what I have already read, what changes alongside
+it?". Every file with a gap is scored by the number of commits in which it
+changed together with a file that already carries a reviewed line, current or
+stale. Files with a score come first, highest first; the rest follow in
+directory order, which is also how ties break. A file never scores itself: a
+commit touching one file you have read and nothing else says nothing about
+what to read next. Reach for it when you have read some of a system and want
+the code that moves with it — the callers, the tests, the config that has to
+change in step — rather than the code that happens to sit next to it.
+
+With nothing marked yet the two orderings are identical: there is nothing to
+have co-changed with.
+
+The signal is one `git log` over the history and nothing else. legu knows no
+language here, so a call graph it cannot see still shows up if the two files
+keep landing in the same commit. Merge commits list no files and so contribute
+nothing, which is what you want: a merge would otherwise read as every file on
+the branch changing together. `--order cochange` needs git and says so if
+there is none; plain `next` still works without it.
+
+`--json` carries the same `next` array, in the order you asked for.
 
 ## Inspect one file
 
@@ -278,6 +317,9 @@ tool, and the alternatives they rejected, are one paragraph each under
   lines are counted once, but `stale` names the old record's whole range until
   it is re-marked in full or forgotten.
 - Content moved between two files that both still exist is stale, not followed.
+- `--order cochange` reads the history under each file's current path, so a
+  file's score starts at its rename: the commits it changed in under its old
+  name do not count.
 - A binary file that is renamed *and* rewritten reports `missing`: git has no
   similarity left to match on, so neither has legu.
 - Paths containing a newline are rejected; they cannot round-trip the store.
@@ -295,3 +337,10 @@ in files that have changed since they were read cost a `git show` and a diff
 each — with 80 files edited at once the read commands take about 2s, while
 `mark` does not move: it anchors only the records that could be sitting in the
 file it marks, never the whole store.
+
+`--order cochange` adds one `git log` over the whole history. On a clone of
+[redis](https://github.com/redis/redis) — 13,281 commits, 2009 to 2026 — with
+one file marked, `next` takes 0.85s and `next --order cochange` 1.17s: the
+ordering costs about 0.33s, most of it the log itself. The history is not
+bounded: at that size the whole of it stays well under the second the ordering
+is allowed.

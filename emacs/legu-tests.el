@@ -1788,6 +1788,70 @@ timestamp, commit and hashes default to any well-formed value."
       (should (equal '("a.txt") (mapcar (lambda (f) (alist-get 'path f))
                                         (alist-get 'next next)))))))
 
+(defun legu-test--queue (&rest args)
+  "The paths `next' suggests, in the order it suggests them."
+  (mapcar (lambda (f) (alist-get 'path f))
+          (alist-get 'next (legu--parse-json
+                            (nth 1 (apply #'legu-test--legu "next" "--json" args))))))
+
+(defun legu-test--commit-edit (paths message)
+  "Append a line to each of PATHS and commit them together under MESSAGE.
+PATHS are relative to `default-directory'."
+  (dolist (path paths)
+    (write-region (concat message "\n") nil (expand-file-name path) 'append))
+  (legu-test--git "add" "-A")
+  (legu-test--git "commit" "-qm" message))
+
+(ert-deftest legu-test-integration-cochange-order-follows-the-commits ()
+  ;; a/x.txt is read; c/z.txt changed with it twice and b/y.txt never did, so
+  ;; co-change order inverts directory order.
+  (legu-test--with-repo (list (cons "a/x.txt" (concat (legu-test--lines 5) "\n"))
+                              (cons "b/y.txt" (concat (legu-test--lines 5) "\n"))
+                              (cons "c/z.txt" (concat (legu-test--lines 5) "\n")))
+    (legu-test--commit-edit '("a/x.txt" "c/z.txt") "pair one")
+    (legu-test--commit-edit '("a/x.txt" "c/z.txt") "pair two")
+    ;; A commit with no diff and a merge both list no files, and neither may
+    ;; fold one commit's file list into another's.
+    (legu-test--git "commit" "-q" "--allow-empty" "-m" "empty marker")
+    (legu-test--git "checkout" "-q" "-b" "side")
+    (legu-test--commit-edit '("c/z.txt") "side")
+    (legu-test--git "checkout" "-q" "-")
+    (legu-test--git "merge" "-q" "--no-ff" "-m" "merge" "side")
+    (legu-test--commit-edit '("b/y.txt") "solo")
+    ;; With nothing read, there is nothing to co-change with.
+    (should (equal (legu-test--queue) (legu-test--queue "--order" "cochange")))
+    (legu-test--legu "mark" "a/x.txt")
+    (should (equal '("b/y.txt" "c/z.txt") (legu-test--queue)))
+    (should (equal '("b/y.txt" "c/z.txt") (legu-test--queue "--order" "dir")))
+    (should (equal '("c/z.txt" "b/y.txt") (legu-test--queue "--order" "cochange")))
+    ;; Same `next' array, same per-file shape, only the order differs.
+    (let ((entry (car (alist-get 'next (legu--parse-json
+                                        (nth 1 (legu-test--legu
+                                                "next" "--json"
+                                                "--order" "cochange")))))))
+      (should (equal "c/z.txt" (alist-get 'path entry)))
+      (should (= 8 (alist-get 'unreviewed entry)))
+      (should (= 0 (alist-get 'stale entry)))
+      (should (equal "1-8" (alist-get 'ranges entry))))
+    ;; An unknown ordering is an error, like every unknown option.
+    (should-not (zerop (car (legu-test--legu "next" "--order" "bogus"))))))
+
+(ert-deftest legu-test-integration-cochange-order-needs-git ()
+  (unless (legu-test--binary-p) (ert-skip "the legu CLI is not installed"))
+  (let* ((root (file-name-as-directory (make-temp-file "legu-nogit" t)))
+         (default-directory root))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name ".review" root))
+          (write-region "one\n" nil (expand-file-name "a.txt" root))
+          ;; Without git there is no history to read, but there is still a
+          ;; working tree to queue.
+          (should (equal '("a.txt") (legu-test--queue)))
+          (let ((run (legu-test--legu "next" "--order" "cochange")))
+            (should-not (zerop (car run)))
+            (should (string-match-p "git" (nth 2 run)))))
+      (delete-directory root t))))
+
 (ert-deftest legu-test-integration-emacs-and-the-cli-agree-on-review-evidence ()
   (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 30) "\n"))
                               (cons "empty.txt" ""))

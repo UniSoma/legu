@@ -17,6 +17,10 @@
 
 (def NUL #"\u0000")
 
+;; What `git log --format` prints ahead of each commit's file list. Any byte
+;; git will not emit inside a path would do; this one cannot appear in one.
+(def SENTINEL "\u0001")
+
 ;; Files are decoded as latin-1 so every byte round-trips: a change in a
 ;; non-UTF-8 byte must not be invisible to the content hash.
 (def ENC "ISO-8859-1")
@@ -110,6 +114,25 @@
       (let [c (name-status commit)]
         (swap! diff-cache assoc commit c)
         c)))
+
+(defn commit-file-sets
+  "The paths changed by each commit, one set per commit, from one `git log`
+   over the whole history. A merge lists nothing, which is what we want: a
+   merge commit would otherwise read as every file on the branch changing
+   together."
+  []
+  (->> (str/split (or (git-ok "log" "--name-only" "-z" "--format=%x01") "") NUL)
+       ;; A commit's own token is the sentinel; the newline git puts between it
+       ;; and the first path rides on whichever token comes next.
+       (reduce (fn [acc t]
+                 (let [t (str/replace-first t #"^\n" "")]
+                   (cond
+                     (str/starts-with? t SENTINEL) (conj acc #{})
+                     (str/blank? t) acc
+                     (empty? acc) acc
+                     :else (update acc (dec (count acc)) conj t))))
+               [])
+       (filterv #(> (count %) 1))))
 
 ;; ---------------------------------------------------------------- content
 
@@ -1048,13 +1071,47 @@
                                  (:path r) (fmt-region r)
                                  (name (:state r)) (:reason r)))))))))
 
+(defn- read-paths
+  "Paths carrying a reviewed line, current or stale, at their location now."
+  [by-path]
+  (set (for [[path states] by-path
+             :when (some seq (vals states))]
+         path)))
+
+(defn cochange-scores
+  "path -> the number of commits in which it changed alongside a file that
+   already carries a reviewed line. A file never scores itself: a commit
+   touching one read file and nothing else says nothing about what to read
+   next. Git history only — no language knows what a file means here."
+  [already-read]
+  (reduce (fn [acc paths]
+            (let [read-here (set/intersection paths already-read)]
+              (if (empty? read-here)
+                acc
+                (reduce (fn [a p]
+                          (if (= #{p} read-here)
+                            a
+                            (update a p (fnil inc 0))))
+                        acc paths))))
+          {}
+          (commit-file-sets)))
+
 (defn cmd-next [{:keys [opts]}]
-  (let [by-path (resolved-by-path)
+  (let [order (or (:order opts) "dir")
+        _ (when (and (= "cochange" order) (not *git?*))
+            (die "--order cochange needs git to read commit history"))
+        by-path (resolved-by-path)
         limit (or (:limit opts) 20)
+        ;; Directory order is the tiebreak under every ordering, so with
+        ;; nothing read yet cochange order is directory order.
+        scores (if (= "cochange" order) (cochange-scores (read-paths by-path)) {})
+        rank (fn [f] [(- (get scores (:path f) 0))
+                      (str (fs/parent (fs/path (:path f))))
+                      (:path f)])
         gaps (->> (eligible-files)
                   (map #(file-coverage by-path %))
                   (filter #(pos? (+ (:unreviewed %) (:stale %))))
-                  (sort-by (juxt #(str (fs/parent (fs/path (:path %)))) :path))
+                  (sort-by rank)
                   (take limit)
                   (mapv (fn [f]
                           (assoc f :todo (into (sorted-set)
@@ -1102,17 +1159,20 @@
              "  legu status [<path>] [--gaps]        per-file review state"
              "  legu regions <path>                  anchored records for one file"
              "  legu stale                           regions needing a re-read"
-             "  legu next [--limit N]                what to read next"
+             "  legu next [--limit N] [--order O]    what to read next"
              "  legu coverage                        never-read / reviewed / stale"
              ""
              "  --json             machine-readable output"
              "  --version          this legu's version and the store schema it writes"
              "  --reviewer <name>  who read it (default: git config user.name)"
              "  --limit <n>        how many files `next` suggests"
+             "  --order <o>        `next` order: dir (default) or cochange"
              "  --gaps             hide files read in full from `status`"]))
 
+;; A set of strings is a flag that takes one of a fixed set of values.
 (def flags {"--json" :flag "--help" :flag "--gaps" :flag "--version" :flag
-            "--reviewer" :value "--limit" :int})
+            "--reviewer" :value "--limit" :int
+            "--order" #{"dir" "cochange"}})
 
 (defn parse-args
   "Options may appear anywhere. Anything unrecognized is an error, never a
@@ -1130,18 +1190,24 @@
           (let [i (str/index-of a "=")
                 k (if i (subs a 0 i) a)
                 inline (when i (subs a (inc i)))
-                kw (keyword (subs k 2))]
-            (case (get flags k)
-              :flag (recur (seq more) (assoc opts kw (not= "false" inline)) args)
-              :value (let [v (or inline (first more))]
-                       (when (str/blank? v) (die (str k " needs a value")))
-                       (recur (seq (if inline more (rest more))) (assoc opts kw v) args))
-              :int (let [v (or inline (first more))
-                         n (parse-long (str v))]
-                     (when-not (and n (pos? n))
-                       (die (str k " expects a positive integer")))
-                     (recur (seq (if inline more (rest more))) (assoc opts kw n) args))
-              (die (str "unknown option: " k))))
+                kw (keyword (subs k 2))
+                t (get flags k)]
+            (if (set? t)
+              (let [v (or inline (first more))]
+                (when-not (t v)
+                  (die (str k " expects one of " (str/join ", " (sort t)))))
+                (recur (seq (if inline more (rest more))) (assoc opts kw v) args))
+              (case t
+                :flag (recur (seq more) (assoc opts kw (not= "false" inline)) args)
+                :value (let [v (or inline (first more))]
+                         (when (str/blank? v) (die (str k " needs a value")))
+                         (recur (seq (if inline more (rest more))) (assoc opts kw v) args))
+                :int (let [v (or inline (first more))
+                           n (parse-long (str v))]
+                       (when-not (and n (pos? n))
+                         (die (str k " expects a positive integer")))
+                       (recur (seq (if inline more (rest more))) (assoc opts kw n) args))
+                (die (str "unknown option: " k)))))
 
           (and (str/starts-with? a "-") (not= a "-"))
           (die (str "unknown option: " a))
