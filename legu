@@ -7,7 +7,6 @@
             [babashka.process :as p]
             [cheshire.core :as json]
             [clojure.edn :as edn]
-            [clojure.pprint :as pp]
             [clojure.set :as set]
             [clojure.string :as str])
   (:import [java.security MessageDigest]
@@ -177,8 +176,12 @@
 ;; would drop the state it holds.
 (def ^:private store-errors (atom (sorted-map)))
 
+(def SCHEMA 2)
+
 (defn- parse-sidecar
-  "{:state s} for a sidecar legu can read, {:error reason} for one it cannot."
+  "{:state s} for a sidecar legu can read, {:error reason} for one it cannot.
+   Only the layout legu writes today is read: there are no stores outside
+   this repository, so an older schema is refused rather than migrated."
   [f]
   (let [[v unreadable] (try [(edn/read-string (slurp f)) nil]
                             (catch Exception e [nil (ex-message e)]))
@@ -191,12 +194,13 @@
     (cond
       unreadable {:error unreadable}
       (not (map? v)) {:error "not a review record"}
-      (contains? v :notes) {:error ":notes was renamed to :tickets (ADR-0012)"}
+      (not= SCHEMA (:schema v)) {:error (str "schema " (pr-str (:schema v))
+                                             " is not the schema legu writes (" SCHEMA ")")}
       bad-range {:error bad-range}
       :else {:state v})))
 
 (defn- blank-state [path]
-  {:schema 1 :path path :regions [] :tickets []})
+  {:path path :regions [] :tickets []})
 
 (defn load-state
   "The sidecar of `path`, dying when it cannot be read. For writers."
@@ -204,7 +208,9 @@
   (let [f (store-file path)]
     (if (fs/exists? f)
       (let [{:keys [state error]} (parse-sidecar f)]
-        (or state (die (str "cannot read " f ": " error))))
+        (if state
+          (assoc state :path path)
+          (die (str "cannot read " f ": " error))))
       (blank-state path))))
 
 (defn read-state
@@ -215,7 +221,9 @@
   (let [f (store-file path)]
     (if (fs/exists? f)
       (let [{:keys [state error]} (parse-sidecar f)]
-        (or state (do (swap! store-errors assoc path error) nil)))
+        (if state
+          (assoc state :path path)
+          (do (swap! store-errors assoc path error) nil)))
       (blank-state path))))
 
 (defn assert-readable!
@@ -225,18 +233,50 @@
   (load-state path)
   nil)
 
+;; The sidecar layout is fixed so that git shows a mark, a supersede or a
+;; forget as the lines of one record and nothing else: one line for the
+;; region, one for who and when, and one per hash, never wrapped or
+;; shortened. Records are sorted on every field they hold, so the same
+;; state is the same bytes whatever order it was reached in.
+(def ^:private record-lines
+  [[:start :end] [:reviewer :ticket :timestamp] [:commit] [:file-hash] [:content-hash]])
+
+(defn- render-record [record]
+  (let [record (if (:opaque record)
+                 (dissoc record :start :end :content-hash)
+                 (dissoc record :opaque))
+        lines (for [ks (cons [:opaque] record-lines)
+                    :let [fields (for [k ks :when (contains? record k)]
+                                   (str k " " (pr-str (get record k))))]
+                    :when (seq fields)]
+                (str/join " " fields))]
+    (str "  {" (str/join "\n   " lines) "}")))
+
+(defn- record-order
+  "Sort key of a record: its region, then every other field it persists."
+  [record]
+  [(or (:start record) 0) (or (:end record) 0)
+   (str (:timestamp record)) (str (:reviewer record)) (str (:ticket record))
+   (str (:commit record)) (str (:file-hash record)) (str (:content-hash record))])
+
+(defn- render-collection [k records]
+  (str " " k " [\n"
+       (str/join "" (map #(str (render-record %) "\n") (sort-by record-order records)))
+       " ]"))
+
+(defn render-sidecar [{:keys [regions tickets]}]
+  (str "{:schema " SCHEMA "\n"
+       (render-collection :regions regions) "\n"
+       (render-collection :tickets tickets) "}\n"))
+
 (defn save-state!
   "Writes the sidecar, or removes it when nothing is left to record."
-  [{:keys [path] :as state}]
-  (let [f (store-file path)
-        by-range (juxt #(or (:start %) 0) #(or (:end %) 0))
-        regions (vec (sort-by by-range (:regions state)))
-        tickets (vec (sort-by by-range (:tickets state)))]
+  [{:keys [path regions tickets] :as state}]
+  (let [f (store-file path)]
     (if (and (empty? regions) (empty? tickets))
       (when (fs/exists? f) (fs/delete f))
       (do (fs/create-dirs (fs/parent f))
-          (spit f (with-out-str (pp/pprint {:schema 1 :path path
-                                            :regions regions :tickets tickets})))))
+          (spit f (render-sidecar state))))
     state))
 
 (defn stored-paths []
@@ -619,6 +659,18 @@
           (die (format "range %d-%d outside %s (1-%d)" start end path total)))
         {:path path :start start :end end :opaque opaque? :cur cur}))))
 
+(defn- evidence-of
+  "What a record stores about `region` as it stands now: where it is, at
+   which commit, what it looked like. An opaque region has no line range and
+   nothing to hash but the file itself."
+  [{:keys [start end opaque cur]}]
+  (cond-> {:commit (or (head-sha) "-")
+           :file-hash (:hash cur)
+           :timestamp (now)}
+    opaque (assoc :opaque true)
+    (not opaque) (assoc :start start :end end
+                        :content-hash (norm-hash (subvec (:lines cur) (dec start) end)))))
+
 (defn- same-region?
   "Does a stored record currently sit exactly where this region does?"
   [region record]
@@ -685,15 +737,8 @@
     (assert-readable! path)
     (purge! {:path path :start start :end end :whole? whole?} :regions contained?)
     (let [state (load-state path)
-          record (cond-> {:start start :end end
-                          :commit (or (head-sha) "-")
-                          :file-hash (:hash cur)
-                          :content-hash (if opaque
-                                          (:hash cur)
-                                          (norm-hash (subvec (:lines cur) (dec start) end)))
-                          :reviewer (reviewer opts)
-                          :timestamp (now)}
-                   opaque (assoc :opaque true))]
+          record (assoc (evidence-of {:start start :end end :opaque opaque :cur cur})
+                        :reviewer (reviewer opts))]
       (save-state! (update state :regions #(conj (vec %) record)))
       (when-let [why (cond
                        ((ignored-files) path) "is excluded by .reviewignore"
@@ -716,15 +761,8 @@
       (purge! {:path path :start start :end end} :tickets
               (fn [region r] (and (= ticket (:ticket r)) (superseded? region r))))
       (let [state (load-state path)
-            record (cond-> {:start start :end end
-                          :ticket ticket
-                          :commit (or (head-sha) "-")
-                          :file-hash (:hash cur)
-                          :content-hash (if opaque
-                                          (:hash cur)
-                                          (norm-hash (subvec (:lines cur) (dec start) end)))
-                          :timestamp (now)}
-                   opaque (assoc :opaque true))]
+            record (assoc (evidence-of {:start start :end end :opaque opaque :cur cur})
+                          :ticket ticket)]
         (save-state! (update state :tickets #(conj (vec %) record)))
         (emit opts {:anchored ticket :path path :start start :end end}
               (fn [_] (println (format "anchored %s at %s%s"
@@ -791,8 +829,11 @@
          :when (= path (:path current))]
      {:stored stored :current current})))
 
-(defn- original-provenance [record]
-  (cond-> (select-keys record [:path :start :end :commit :timestamp])
+(defn- original-provenance
+  "Where and when a record was made. An opaque record reports null bounds."
+  [record]
+  (cond-> {:path (:path record) :start (:start record) :end (:end record)
+           :commit (:commit record) :timestamp (:timestamp record)}
     (contains? record :reviewer) (assoc :reviewer (:reviewer record))))
 
 (defn- current-record

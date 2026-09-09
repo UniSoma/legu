@@ -396,15 +396,17 @@ half-written merge conflict -- reads as nil and downgrades the caller."
   "Absolute path of the sidecar recording RELPATH under ROOT."
   (expand-file-name (concat ".review/" relpath ".edn") root))
 
+(defconst legu-sidecar-schema 2
+  "The sidecar schema this package reads, the one the CLI writes.")
+
 (defvar legu--schema-warned nil
   "Roots already warned about an unreadable store schema.")
 
 (defun legu-sidecar-records (root relpath)
   "Records stored for RELPATH under ROOT, as a plist.
 The plist has `:regions' and `:tickets', each a list of alists, and
-`:ok' which is nil when the sidecar exists but could not be read.  A
-sidecar still carrying the pre-ADR-0012 `:notes' key counts as unreadable,
-exactly as the CLI treats it."
+`:ok' which is nil when the sidecar exists but could not be read.  Only
+the schema the CLI writes today is read, exactly as the CLI itself does."
   (let ((file (legu-sidecar-file root relpath)))
     (if (not (and (file-regular-p file) (file-readable-p file)))
         (list :regions nil :tickets nil :ok t)
@@ -413,12 +415,12 @@ exactly as the CLI treats it."
                      (buffer-string)))
              (data (legu--read-edn text)))
         (cond
-         ((or (null data) (assq 'notes data)) (list :regions nil :tickets nil :ok nil))
-         ((not (eql 1 (alist-get 'schema data)))
+         ((null data) (list :regions nil :tickets nil :ok nil))
+         ((not (eql legu-sidecar-schema (alist-get 'schema data)))
           (unless (member root legu--schema-warned)
             (push root legu--schema-warned)
-            (message "legu: sidecar schema %s is newer than this package; painting from the CLI only"
-                     (alist-get 'schema data)))
+            (message "legu: sidecar schema %s is not the %s this package reads; painting from the CLI only"
+                     (alist-get 'schema data) legu-sidecar-schema))
           (list :regions nil :tickets nil :ok nil))
          (t (list :regions (alist-get 'regions data)
                   :tickets (alist-get 'tickets data)

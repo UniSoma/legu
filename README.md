@@ -171,14 +171,36 @@ Doom users are supported out of the box. See
 tree — committed alongside the code. Source files are never modified.
 
 ```clojure
-{:schema 1
- :path "src/core.clj"
- :regions [{:start 40 :end 95
-            :commit "a1b2c3…"
-            :file-hash "…" :content-hash "…"
-            :reviewer "jonas" :timestamp "2026-08-28T01:00:00Z"}]
- :tickets [{:start 40 :end 95 :ticket "lgu-01k7" :commit "a1b2c3…" …}]}
+{:schema 2
+ :regions [
+  {:start 40 :end 95
+   :reviewer "jonas" :timestamp "2026-08-28T01:00:00Z"
+   :commit "a1b2c3…"
+   :file-hash "…"
+   :content-hash "…"}
+ ]
+ :tickets [
+  {:start 52 :end 52
+   :ticket "lgu-01k7" :timestamp "2026-08-28T01:00:00Z"
+   :commit "a1b2c3…"
+   :file-hash "…"
+   :content-hash "…"}
+ ]}
 ```
+
+The layout is fixed so that git shows a change to the store as the lines of
+one record and nothing else. Every record is self-contained: its region on one
+line, who read it and when on the next, then the commit and each full hash on
+a line of its own. Collection delimiters sit on lines of their own, so adding
+or removing a record never touches its neighbours, and two people editing
+different records merge cleanly while two edits to the same record are a
+conflict git shows you. Records are sorted by region, ties broken by their
+remaining fields, so the same state is always the same bytes. The source path
+is not stored: the sidecar's own location says it. An opaque record has no
+line range and no content hash, only `:opaque true` and the file hash. Both
+collections are always written, and a sidecar with nothing left in it is
+removed. Sidecars of any other schema are refused, not migrated
+([ADR-0014](docs/adr/0014-fixed-layout-sidecars.md)).
 
 legu skips a sidecar it cannot parse — most often one with a merge conflict
 left in it — instead of dying on it. `status`, `stale`, `next` and `coverage`
