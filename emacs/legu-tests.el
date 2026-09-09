@@ -531,6 +531,68 @@
       (should (equal (reverse started) '("a" "b"))))))
 
 
+;;;; The version handshake
+
+(defmacro legu-test--with-version-answer (answer &rest body)
+  "Run BODY with `legu--run' answering the version handshake with ANSWER.
+ANSWER is (STATUS STDOUT).  Binds `calls' to the argument lists seen and
+`messages' to what the handshake said, newest first."
+  (declare (indent 1))
+  `(let ((legu--version-checked nil) calls messages)
+     (cl-letf (((symbol-function 'legu--run)
+                (lambda (_root args callback)
+                  (push args calls)
+                  (funcall callback (nth 0 ,answer) (nth 1 ,answer) "")))
+               ((symbol-function 'message)
+                (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
+       ,@body)))
+
+(ert-deftest legu-test-version-handshake-is-asked-once-per-root ()
+  (legu-test--with-version-answer
+      (list 'ok (format "{\"version\":\"%s\",\"schema\":%d}"
+                        legu-cli-minimum-version legu-sidecar-schema))
+    (legu--check-version "/r/")
+    (legu--check-version "/r/")
+    (should (equal calls '(("--version" "--json"))))
+    (should-not messages)))
+
+(ert-deftest legu-test-version-handshake-happens-on-the-first-cli-run ()
+  "Any CLI run asks, not just the snapshot -- and asks once."
+  (let ((legu--version-checked nil) messages)
+    (cl-letf (((symbol-function 'legu--program) (lambda () "/bin/true"))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
+      (legu--run default-directory '("status" "--json") #'ignore)
+      (legu--run default-directory '("stale" "--json") #'ignore)
+      (legu-test--wait (lambda () messages) 5)
+      ;; /bin/true names no version, which is what an old legu looks like.
+      (should (= 1 (length messages)))
+      (should (string-match-p "names no version" (car messages))))))
+
+(ert-deftest legu-test-version-handshake-names-a-cli-too-old-to-answer ()
+  (legu-test--with-version-answer (list 'failed "")
+    (legu--check-version "/r/")
+    (should (= 1 (length messages)))
+    (should (string-match-p (regexp-quote legu-cli-minimum-version) (car messages)))))
+
+(ert-deftest legu-test-version-handshake-names-a-cli-older-than-we-speak ()
+  (legu-test--with-version-answer
+      (list 'ok (format "{\"version\":\"0.0.1\",\"schema\":%d}" legu-sidecar-schema))
+    (legu--check-version "/r/")
+    (should (= 1 (length messages)))
+    (should (string-match-p "0\\.0\\.1" (car messages)))
+    (should (string-match-p (regexp-quote legu-cli-minimum-version) (car messages)))))
+
+(ert-deftest legu-test-version-handshake-names-a-store-schema-we-do-not-read ()
+  (legu-test--with-version-answer
+      (list 'ok (format "{\"version\":\"99.0.0\",\"schema\":%d}"
+                        (1+ legu-sidecar-schema)))
+    (legu--check-version "/r/")
+    (should (= 1 (length messages)))
+    (should (string-match-p (format "schema %d" (1+ legu-sidecar-schema))
+                            (car messages)))))
+
+
 ;;;; Integration: the real binary against a real repository
 
 (defmacro legu-test--with-repo (files &rest body)
@@ -547,6 +609,7 @@ FILES is a list of (RELPATH . CONTENT).  Skips unless legu is installed."
             (legu--write-active (make-hash-table :test #'equal))
             (legu--root-cheap-cache (make-hash-table :test #'equal))
             (legu--warned-paths nil)
+            (legu--version-checked nil)
             (legu--failures nil))
        (unwind-protect
            (progn
@@ -1025,14 +1088,19 @@ FILES is a list of (RELPATH . CONTENT).  Skips unless legu is installed."
                  "{\"path\":\"a.txt\",\"regions\":[],\"tickets\":[],\"complete\":true}" "")
         (should-not messages)))))
 
-(ert-deftest legu-test-integration-cli-surface-is-what-we-speak ()
-  "Canary for a CLI upgrade that changes the surface out from under us."
+(ert-deftest legu-test-integration-cli-version-is-one-we-speak ()
+  "The handshake: the installed CLI names a version and the schema it writes."
   (unless (legu-test--binary-p) (ert-skip "the legu CLI is not installed"))
-  (let ((result (legu-test--legu "--help")))
+  (let ((plain (legu-test--legu "--version")))
+    (should (= 0 (nth 0 plain)))
+    (should (string-match-p "\\`legu [0-9][^ ]* (store schema [0-9]+)"
+                            (nth 1 plain))))
+  (let* ((result (legu-test--legu "--version" "--json"))
+         (data (legu--parse-json (nth 1 result))))
     (should (= 0 (nth 0 result)))
-    (dolist (word '("mark" "ticket" "forget" "status" "regions" "stale" "next" "coverage"
-                    "--json" "--reviewer" "--limit"))
-      (should (string-match-p (regexp-quote word) (nth 1 result))))))
+    (should (stringp (alist-get 'version data)))
+    (should-not (version< (alist-get 'version data) legu-cli-minimum-version))
+    (should (eql legu-sidecar-schema (alist-get 'schema data)))))
 
 
 ;;;; The per-file regions query

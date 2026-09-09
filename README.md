@@ -42,6 +42,20 @@ rather than a silently swallowed argument:
 - `--limit <n>` — how many files `next` suggests
 - `--gaps` — `status` lists only files with something left to read
 - `--help`
+- `--version` — the version and the store schema (the `:schema` every sidecar
+  carries) this legu writes, which is what a client needs before it trusts
+  what it reads out of `.review/`:
+
+```
+$ legu --version
+legu 0.4.1 (store schema 2)
+
+$ legu --version --json
+{
+  "version" : "0.4.1",
+  "schema" : 2
+}
+```
 
 ## How staleness works
 

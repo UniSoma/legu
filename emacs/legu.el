@@ -538,6 +538,7 @@ CALLBACK receives (STATUS STDOUT STDERR), STATUS either `ok' or
         (funcall callback 'failed ""
                  (format "legu: executable %S not found on `exec-path'"
                          legu-executable))
+      (legu--check-version root)
       (let* ((default-directory root)
            (out (generate-new-buffer " *legu-out*" t))
            (err (generate-new-buffer " *legu-err*" t))
@@ -576,6 +577,41 @@ CALLBACK receives (STATUS STDOUT STDERR), STATUS either `ok' or
   (unless (member key legu--warned-paths)
     (push key legu--warned-paths)
     (message "%s" (string-trim text))))
+
+
+;;;; The version handshake
+
+(defconst legu-cli-minimum-version "0.4.1"
+  "The oldest legu CLI this package knows how to speak to.")
+
+(defvar legu--version-checked nil
+  "Roots whose CLI has already been asked what it is, this session.")
+
+(defun legu--check-version (root)
+  "Ask ROOT's legu what it is, once a session.
+Say so when the answer is not one this package recognises.  Nothing
+waits on it: an unrecognised CLI is still driven, just with a warning."
+  ;; The root is marked asked before the question is asked, so the handshake's
+  ;; own `legu--run' does not ask it again, and again.
+  (unless (member root legu--version-checked)
+    (push root legu--version-checked)
+    (legu--run
+     root '("--version" "--json")
+     (lambda (status stdout _stderr)
+       (let* ((data (and (eq status 'ok) (legu--parse-json stdout)))
+              (version (alist-get 'version data))
+              (schema (alist-get 'schema data))
+              (parsed (and (stringp version) (ignore-errors (version-to-list version)))))
+         (cond
+          ((null parsed)
+           (message "legu: this legu names no version legu.el understands; it speaks to %s or newer"
+                    legu-cli-minimum-version))
+          ((version-list-< parsed (version-to-list legu-cli-minimum-version))
+           (message "legu: this legu is %s, older than the %s legu.el speaks to; upgrade it"
+                    version legu-cli-minimum-version))
+          ((not (eql schema legu-sidecar-schema))
+           (message "legu: this legu writes store schema %s, not the %s legu.el reads; painting from the CLI only"
+                    schema legu-sidecar-schema))))))))
 
 
 ;;;; The snapshot
@@ -1678,7 +1714,8 @@ With a prefix argument REFRESH, refresh the snapshot first."
   (interactive "P")
   (clrhash legu--root-cheap-cache)
   (when force
-    (setq legu--schema-warned nil legu--warned-paths nil)
+    (setq legu--schema-warned nil legu--warned-paths nil
+          legu--version-checked nil)
     (let ((root (or legu--root (legu-root))))
       (when root
         (legu--snapshot-put root :state 'fresh)

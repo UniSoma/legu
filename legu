@@ -21,6 +21,8 @@
 ;; non-UTF-8 byte must not be invisible to the content hash.
 (def ENC "ISO-8859-1")
 
+(def VERSION "0.4.1")
+
 (defn die [msg]
   (binding [*out* *err*] (println (str "legu: " msg)))
   (System/exit 1))
@@ -1104,11 +1106,12 @@
              "  legu coverage                        never-read / reviewed / stale"
              ""
              "  --json             machine-readable output"
+             "  --version          this legu's version and the store schema it writes"
              "  --reviewer <name>  who read it (default: git config user.name)"
              "  --limit <n>        how many files `next` suggests"
              "  --gaps             hide files read in full from `status`"]))
 
-(def flags {"--json" :flag "--help" :flag "--gaps" :flag
+(def flags {"--json" :flag "--help" :flag "--gaps" :flag "--version" :flag
             "--reviewer" :value "--limit" :int})
 
 (defn parse-args
@@ -1169,6 +1172,11 @@
     (let [{:keys [opts args]} (parse-args argv)
           [cmd & rest-args] args]
       (cond
+        (:version opts)
+        (emit opts {:version VERSION :schema sidecar-schema}
+              (fn [{:keys [version schema]}]
+                (println (str "legu " version " (store schema " schema ")"))))
+
         (or (:help opts) (nil? cmd)) (println usage)
 
         (contains? commands cmd)

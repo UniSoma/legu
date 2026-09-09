@@ -15,7 +15,8 @@ line tool, which stays the single owner of review state.
 - Emacs 30.1 or newer
 - `transient` 0.7.2 — the version bundled with Emacs 30 already satisfies this,
   so nothing is downloaded
-- the `legu` executable on `exec-path`, and `git`
+- the `legu` executable on `exec-path`, and `git`. legu.el speaks to legu
+  0.4.1 or newer
 
 ## Install
 
@@ -164,6 +165,12 @@ an older asynchronous answer.
 A snapshot may only pronounce on a file it is newer than. Without that guard
 the union paints a lie: edit inside a region you had read, save, and a
 snapshot from a minute ago would still call it read.
+
+The first CLI run against a repository is preceded by one
+`legu --version --json`. A legu older than the one this package speaks to, or
+one writing a store schema it does not read, says so in the echo area once
+per repository. Nothing waits on that answer: an unrecognised legu is still
+driven, just with the warning standing.
 
 Nothing ever blocks Emacs. Refreshes are debounced, coalesced, and never
 overlap a write; writes are serialized per repository, because the CLI's
