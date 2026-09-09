@@ -92,8 +92,38 @@
     ;; Pinned by the names it must contain, not verbatim: the blob itself is
     ;; regenerated when the parser moves to babashka.cli.
     (doseq [named ["mark" "ticket" "forget" "status" "regions" "stale" "next" "coverage"
-                   "--json" "--version" "--reviewer" "--limit" "--order" "--gaps"]]
-      (is (str/includes? (:out bare) named) named))))
+                   "--json" "--version"]]
+      (is (str/includes? (:out bare) named) named))
+    ;; This loop asserted --reviewer, --limit, --order and --gaps here too, until
+    ;; lgu-01m238wskh6s scoped each to the one command that reads it. Root help
+    ;; lists what legu itself takes; the rest is a command's own help away.
+    (doseq [scoped ["--reviewer" "--limit" "--order" "--gaps"]]
+      (is (not (str/includes? (:out bare) scoped)) scoped))))
+
+(deftest a-commands-help-names-its-arguments-and-only-its-own-options
+  (let [dir (scratch-repo!)
+        mark (:out (legu! dir "mark" "--help"))
+        status (:out (legu! dir "status" "--help"))
+        regions (:out (legu! dir "regions" "--help"))
+        queue (:out (legu! dir "next" "--help"))
+        stale (:out (legu! dir "stale" "--help"))]
+    (is (str/includes? mark "Arguments:"))
+    (is (str/includes? mark "<target>"))
+    (is (str/includes? mark "--reviewer"))
+    (is (not (str/includes? mark "--limit")))
+    ;; The brackets are the whole distinction: regions needs a path, status
+    ;; takes one and covers the repository without it.
+    (is (str/includes? regions "<path>"))
+    (is (not (str/includes? regions "[<path>]")))
+    (is (str/includes? status "[<path>]"))
+    (is (str/includes? status "--gaps"))
+    (is (not (str/includes? status "--limit")))
+    ;; An enum keeps the order it was declared in, so the default reads first.
+    (is (str/includes? queue "(one of: dir, cochange)"))
+    (is (not (str/includes? stale "Arguments:")))
+    ;; --json is legu's own, so it survives on every page.
+    (doseq [page [mark status regions queue stale]]
+      (is (str/includes? page "--json") page))))
 
 (deftest version-names-the-version-and-the-store-schema
   ;; The Emacs package parses this line for its handshake (emacs/legu.el:599),
@@ -114,11 +144,18 @@
 
 ;; ---------------------------------------------------------------- options
 
-(deftest an-option-may-precede-the-command
+(deftest an-option-legu-itself-takes-may-precede-the-command
+  ;; This case read --gaps on both sides until lgu-01m238wskh6s scoped it to
+  ;; status. Only the options legu itself takes still stand on either side.
   (let [dir (scratch-repo!)
-        before (legu! dir "--gaps" "status")
-        after (legu! dir "status" "--gaps")]
-    (prints-the-same-as before after)))
+        before (legu! dir "--json" "status")
+        after (legu! dir "status" "--json")]
+    (prints-the-same-as before after)
+    ;; A scoped option cannot stand before the command that scopes it, but it
+    ;; is not unknown either, and the message says which command to put it on.
+    (fails-with dir ["--gaps" "status"] "--gaps belongs to status, and stands after it")
+    (fails-with dir ["--limit" "3" "next"] "--limit belongs to next, and stands after it")
+    (fails-with dir ["--badopt" "status"] "unknown option: --badopt")))
 
 (deftest json-false-selects-human-output
   (let [dir (scratch-repo!)
@@ -136,14 +173,16 @@
         plain (legu! dir "status")]
     (prints-the-same-as off plain)))
 
-(deftest an-option-the-command-never-reads-is-still-accepted
-  ;; lgu-01m238wskh6s scopes options per command and turns this line into an
-  ;; error naming --limit. That ticket edits this case; the change is intended,
-  ;; not a regression.
-  (let [dir (scratch-repo!)
-        ignored (legu! dir "status" "--limit" "3")
-        plain (legu! dir "status")]
-    (prints-the-same-as ignored plain)))
+(deftest an-option-the-command-never-reads-is-refused
+  ;; This case recorded `legu status --limit 3` printing the same status as
+  ;; `legu status`, with --limit silently ignored. lgu-01m238wskh6s turns it
+  ;; into an error naming the option, which is the reason that ticket exists:
+  ;; a flag that did nothing gave the reader no signal.
+  (let [dir (scratch-repo!)]
+    (fails-with dir ["status" "--limit" "3"] "status does not take --limit")
+    (fails-with dir ["next" "--gaps"] "next does not take --gaps")
+    (fails-with dir ["coverage" "--reviewer" "me"] "coverage does not take --reviewer")
+    (fails-with dir ["mark" "alpha.txt" "--order" "dir"] "mark does not take --order")))
 
 (deftest an-argument-is-not-also-an-option-spelling
   ;; The dispatch tree names each command's arguments so that an option after
@@ -162,11 +201,14 @@
   ;; contains once named --json for a typo in -js.
   (let [dir (scratch-repo!)]
     (fails-with dir ["status" "--json" "-js"] "unknown option: -js")
-    (fails-with dir ["--reviewer=me" "-r"] "unknown option: -r")))
+    ;; --reviewer needs mark in front of it since lgu-01m238wskh6s scoped it.
+    (fails-with dir ["mark" "--reviewer=me" "-r"] "unknown option: -r")))
 
 (deftest a-value-option-refuses-an-empty-value
+  ;; The command in front is lgu-01m238wskh6s: --reviewer stood alone before it
+  ;; was scoped to mark. The wording is legu's, as it is for every option value.
   (let [dir (scratch-repo!)]
-    (doseq [args [["--reviewer"] ["--reviewer="]]]
+    (doseq [args [["mark" "alpha.txt" "--reviewer"] ["mark" "alpha.txt" "--reviewer="]]]
       (fails-with dir args "--reviewer needs a value"))))
 
 (deftest limit-refuses-anything-but-a-positive-integer
@@ -180,32 +222,48 @@
 
 (deftest order-names-the-orders-it-accepts
   (let [dir (scratch-repo!)]
-    (fails-with dir ["next" "--order" "nope"] "--order expects one of cochange, dir")
+    ;; dir before cochange: an enum keeps its declaration order, where the set
+    ;; this replaced sorted and named cochange first.
+    (fails-with dir ["next" "--order" "nope"] "--order expects one of dir, cochange")
     (is (= 0 (:exit (legu! dir "next" "--order" "cochange"))))
     (is (= 0 (:exit (legu! dir "next" "--order=dir"))))))
 
 ;; ---------------------------------------------------------------- arity
 
 (deftest each-command-refuses-more-arguments-than-it-takes
+  ;; Each line read "mark takes 1 argument, got 2" until lgu-01m238wskh6s
+  ;; declared the arguments in the spec and let babashka.cli count them. The
+  ;; count legu kept by hand is gone, and so is its wording.
   (let [dir (scratch-repo!)]
-    (doseq [[args message] [[["mark" "a" "b"] "mark takes 1 argument, got 2"]
-                            [["ticket" "a" "b" "c"] "ticket takes 2 arguments, got 3"]
-                            [["forget" "a" "b"] "forget takes 1 argument, got 2"]
-                            [["status" "a" "b"] "status takes 1 argument, got 2"]
-                            [["regions" "a" "b"] "regions takes 1 argument, got 2"]
-                            [["stale" "x"] "stale takes 0 arguments, got 1"]
-                            [["next" "x"] "next takes 0 arguments, got 1"]
-                            [["coverage" "extra"] "coverage takes 0 arguments, got 1"]]]
+    (doseq [[args message] [[["mark" "a" "b"] "unexpected argument: b"]
+                            [["ticket" "a" "b" "c"] "unexpected argument: c"]
+                            [["forget" "a" "b"] "unexpected argument: b"]
+                            [["status" "a" "b"] "unexpected argument: b"]
+                            [["regions" "a" "b"] "unexpected argument: b"]
+                            [["stale" "x"] "unexpected argument: x"]
+                            [["next" "x"] "unexpected argument: x"]
+                            [["coverage" "extra"] "unexpected argument: extra"]]]
       (fails-with dir args message))))
 
 (deftest a-command-names-the-argument-it-is-missing
+  ;; The messages read "mark needs a path", "ticket needs a path", "ticket needs
+  ;; a ticket id", "forget needs a path" and "regions needs a path" until
+  ;; lgu-01m238wskh6s deleted the guards that spelled them. The wording is the
+  ;; library's now, and names each argument exactly as its help does.
   (let [dir (scratch-repo!)]
-    (doseq [[args message] [[["mark"] "mark needs a path"]
-                            [["ticket"] "ticket needs a path"]
-                            [["ticket" "alpha.txt"] "ticket needs a ticket id"]
-                            [["forget"] "forget needs a path"]
-                            [["regions"] "regions needs a path"]]]
+    (doseq [[args message] [[["mark"] "required argument: <target>"]
+                            [["ticket"] "required argument: <target>"]
+                            [["ticket" "alpha.txt"] "required argument: <id>"]
+                            [["forget"] "required argument: <target>"]
+                            [["regions"] "required argument: <path>"]]]
       (fails-with dir args message))))
+
+(deftest a-ticket-id-typed-as-nothing-is-refused
+  ;; The guard that read "ticket needs a ticket id" covered a missing id and an
+  ;; empty one alike. lgu-01m238wskh6s moved both into the spec, so the empty
+  ;; one has to keep failing.
+  (fails-with (scratch-repo!) ["ticket" "alpha.txt" ""]
+              "invalid value for argument <id>: "))
 
 (deftest status-takes-a-path-but-does-not-need-one
   (let [dir (scratch-repo!)
@@ -241,7 +299,7 @@
     ;; Without the terminator the leading hyphen reads as an option, and after
     ;; it every token is an argument — including one spelled like an option.
     (fails-with dir ["regions" "-weird.txt"] "unknown option: -weird.txt")
-    (fails-with dir ["regions" "--" "-weird.txt" "--json"] "regions takes 1 argument, got 2")))
+    (fails-with dir ["regions" "--" "-weird.txt" "--json"] "unexpected argument: --json")))
 
 ;; ---------------------------------------------------------------- errors
 

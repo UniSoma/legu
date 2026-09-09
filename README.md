@@ -35,15 +35,23 @@ legu next --order cochange             # ...ordered by what changes with what yo
 legu coverage                          # the three numbers
 ```
 
-Options may appear anywhere on the line, and an unrecognized one is an error
-rather than a silently swallowed argument:
+Each option belongs to the one command that reads it, and stands after that
+command. Giving it to another command is an error naming the option, and so is
+putting it before its own; an option legu does not have at all is a third. `legu
+status --limit 3` answers `status does not take --limit`, where legu used to
+accept the line and ignore the flag:
+
+- `mark --reviewer <name>` — defaults to `git config user.name`
+- `next --limit <n>` — how many files `next` suggests
+- `next --order <dir|cochange>` — which question `next` answers (below)
+- `status --gaps` — `status` lists only files with something left to read
+
+Three options are legu's own rather than any command's, and those may still
+appear anywhere on the line:
 
 - `--json` — machine-readable output
-- `--reviewer <name>` — defaults to `git config user.name`
-- `--limit <n>` — how many files `next` suggests
-- `--order <dir|cochange>` — which question `next` answers (below)
-- `--gaps` — `status` lists only files with something left to read
-- `--help`
+- `--help` — the commands and these three; `legu <command> --help` adds the
+  arguments and options of one command
 - `--version` — the version and the store schema (the `:schema` every sidecar
   carries) this legu writes, which is what a client needs before it trusts
   what it reads out of `.review/`:

@@ -803,9 +803,8 @@
           :when (not= state pruned)]
     (save-state! (assoc pruned :path sidecar))))
 
-(defn cmd-mark [{:keys [args opts]}]
-  (when-not (first args) (die "mark needs a path"))
-  (let [{:keys [path start end opaque cur] :as region} (region-of (first args))
+(defn cmd-mark [{:keys [opts]}]
+  (let [{:keys [path start end opaque cur] :as region} (region-of (:target opts))
         whole? (or opaque (and (= 1 start) (= end (count (:lines cur)))))]
     (assert-readable! path)
     (purge! {:path path :start start :end end :whole? whole?} :regions contained?)
@@ -824,25 +823,22 @@
                                      (subs (:commit record) 0
                                            (min 8 (count (:commit record)))))))))))
 
-(defn cmd-ticket [{:keys [args opts]}]
-  (let [[t ticket] args]
-    (when-not t (die "ticket needs a path"))
-    (when (str/blank? ticket) (die "ticket needs a ticket id"))
-    (let [{:keys [path start end opaque] :as region} (region-of t)]
-      (assert-readable! path)
-      (purge! {:path path :start start :end end} :tickets
-              (fn [region r] (and (= ticket (:ticket r)) (superseded? region r))))
-      (let [state (load-state path)
-            record (assoc (evidence-of region) :ticket ticket)]
-        (save-state! (update state :tickets #(conj (vec %) record)))
-        (emit opts {:anchored ticket :path path :start start :end end}
-              (fn [_] (println (format "anchored %s at %s%s"
-                                       ticket
-                                       path (if opaque "" (str ":" start "-" end))))))))))
+(defn cmd-ticket [{:keys [opts]}]
+  (let [ticket (:id opts)
+        {:keys [path start end opaque] :as region} (region-of (:target opts))]
+    (assert-readable! path)
+    (purge! {:path path :start start :end end} :tickets
+            (fn [region r] (and (= ticket (:ticket r)) (superseded? region r))))
+    (let [state (load-state path)
+          record (assoc (evidence-of region) :ticket ticket)]
+      (save-state! (update state :tickets #(conj (vec %) record)))
+      (emit opts {:anchored ticket :path path :start start :end end}
+            (fn [_] (println (format "anchored %s at %s%s"
+                                     ticket
+                                     path (if opaque "" (str ":" start "-" end)))))))))
 
-(defn cmd-forget [{:keys [args opts]}]
-  (when-not (first args) (die "forget needs a path"))
-  (let [target (parse-target (first args))
+(defn cmd-forget [{:keys [opts]}]
+  (let [target (parse-target (:target opts))
         path (rel-path (:path target))
         {:keys [start end]} target
         region {:path path :start start :end end}
@@ -952,9 +948,8 @@
              (or (:timestamp original) "?")
              (or (:commit original) "?")))))
 
-(defn cmd-regions [{:keys [args opts]}]
-  (when-not (first args) (die "regions needs a path"))
-  (let [path (rel-path (first args))
+(defn cmd-regions [{:keys [opts]}]
+  (let [path (rel-path (:path opts))
         file (fs/file *root* path)]
     (when (fs/directory? file) (die (str "path is a directory: " path)))
     (let [cur (read-worktree path)
@@ -1071,8 +1066,8 @@
                       "  " (paint (case (:state t) :stale :yellow :reviewed :green :dim)
                                   (name (:state t)))))))))
 
-(defn cmd-status [{:keys [args opts]}]
-  (let [prefix (some-> (first args) (str/replace #"/$" "") rel-path)
+(defn cmd-status [{:keys [opts]}]
+  (let [prefix (some-> (:path opts) (str/replace #"/$" "") rel-path)
         scope (when (and prefix (not= prefix ".")) prefix)
         by-path (resolved-by-path)
         all-files (->> (eligible-files)
@@ -1227,58 +1222,116 @@
 ;; ---------------------------------------------------------------- cli
 
 (def options
-  "Every option legu takes, declared once at the dispatch level. Declaring them
-   there is what lets each one stand on either side of the command, as they
-   always have; scoping them to the commands that read them is
-   lgu-01m238wskh6s."
+  "The options legu itself takes, declared at the dispatch level. babashka.cli
+   exempts these from a command's :restrict, which is what lets them stand on
+   either side of the command now that the rest may not."
   {:json {:coerce :boolean :desc "machine-readable output"}
    :version {:coerce :boolean :desc "this legu's version and the store schema it writes"}
-   :help {:coerce :boolean :alias :h :desc "this help"}
-   :reviewer {:validate #(and (string? %) (not (str/blank? %)))
+   :help {:coerce :boolean :alias :h :desc "this help"}})
+
+(def command-options
+  "The options that belong to one command each. Every other command refuses
+   them, so a flag that would have done nothing says so."
+  {:reviewer {:validate #(and (string? %) (not (str/blank? %)))
               :desc "who read it (default: git config user.name)"}
-   ;; parse-long rather than :coerce :long, so a value that is not a number
-   ;; reaches :validate instead of failing in the library's words inside the
-   ;; coercion.
-   :limit {:coerce #(parse-long (str %)) :validate #(and (int? %) (pos? %))
-           :desc "how many files `next` suggests"}
+   :limit {:coerce :long :validate pos? :desc "how many files `next` suggests"}
+   ;; An enum, not a set: it keeps the order it is written in, so help and the
+   ;; error name dir first, as the default and as the order a reader meets.
    :order {:enum ["dir" "cochange"] :desc "`next` order (default: dir)"}
    :gaps {:coerce :boolean :desc "hide files read in full from `status`"}})
 
 (def commands
   "One entry per command. :doc is both its line in `legu --help` and the
    description in its own help; :arguments names the arguments it takes, in
-   order, and its length is the count checked before the command runs."
-  [{:cmds ["mark"] :run cmd-mark :arguments [:target]
+   order, :optional the ones it can run without, and :options the keys of
+   command-options it reads."
+  [{:cmds ["mark"] :run cmd-mark :arguments [:target] :options [:reviewer]
     :doc "mark a region reviewed at HEAD"}
    {:cmds ["ticket"] :run cmd-ticket :arguments [:target :id]
     :doc "anchor a ticket reference"}
    {:cmds ["forget"] :run cmd-forget :arguments [:target]
     :doc "drop a region's review state"}
-   {:cmds ["status"] :run cmd-status :arguments [:path]
+   {:cmds ["status"] :run cmd-status :arguments [:path] :optional #{:path}
+    :options [:gaps]
     :doc "per-file review state"}
    {:cmds ["regions"] :run cmd-regions :arguments [:path]
     :doc "anchored records for one file"}
    {:cmds ["stale"] :run cmd-stale :arguments []
     :doc "regions needing a re-read"}
-   {:cmds ["next"] :run cmd-next :arguments []
+   {:cmds ["next"] :run cmd-next :arguments [] :options [:limit :order]
     :doc "what to read next"}
    {:cmds ["coverage"] :run cmd-coverage :arguments []
     :doc "never-read / reviewed / stale"}])
 
-(def argument-descriptions
-  "What each argument is called in help. The keys are shared across commands
-   because the argument means the same thing wherever it appears."
-  {:target "path[:<start>-<end>]"
-   :id "the ticket's id in its own tracker"
-   :path "limit to this file or directory"})
+(def argument-specs
+  "What each argument is called in help and what its value must satisfy. The
+   keys are shared across commands because the argument means the same thing
+   wherever it appears; a ticket id typed as an empty string would anchor
+   nothing to a region."
+  {:target {:desc "path[:<start>-<end>]"}
+   :id {:desc "the ticket's id in its own tracker"
+        :validate #(not (str/blank? %))}
+   :path {:desc "limit to this file or directory"}})
+
+(defn argument-ref
+  "How an argument is written wherever a reader meets it: <target> when the
+   command needs it, [<path>] when it runs without one. babashka.cli renders
+   every positional as <name> unless :ref says otherwise, so the brackets are
+   legu's to supply."
+  [argument optional]
+  (if (contains? optional argument)
+    (str "[<" (name argument) ">]")
+    (str "<" (name argument) ">")))
+
+(defn command-named
+  "The command a dispatch path names, or nil at the root."
+  [dispatch]
+  (first (filter #(= dispatch (:cmds %)) commands)))
+
+(defn missing-argument
+  "The argument to name when a command is short of one: the first it declares,
+   is not content to run without, and did not get. Naming the first rather than
+   any of them is what makes a bare `legu ticket` ask for <target>, the one the
+   reader has to supply before <id> means anything."
+  [{:keys [arguments optional]} opts]
+  (when-let [argument (first (remove #(or (contains? optional %) (contains? opts %))
+                                     arguments))]
+    (str "required argument: " (argument-ref argument optional))))
+
+(defn refused-value
+  "What legu says about an argument value the spec turns down."
+  [argument optional value]
+  (str "invalid value for argument " (argument-ref argument optional) ": " value))
+
+(defn refused-argument
+  "The message for an argument whose value the spec turns down. An argument
+   standing after the terminator is filled in once the parser has finished, so
+   the :validate the spec declares reaches it here instead of there. Both paths
+   word it the same way."
+  [{:keys [arguments optional]} opts]
+  (some (fn [argument]
+          (let [check (:validate (argument-specs argument))
+                value (get opts argument)]
+            (when (and check (contains? opts argument) (not (check value)))
+              (refused-value argument optional value))))
+        arguments))
 
 (defn argument-spec
   "The spec entries for a command's arguments. :positional both puts them under
    Arguments: in help and refuses them as flags, so `legu mark --target x` is
    the unknown option it has always been."
-  [arguments]
+  [{:keys [arguments optional]}]
   (into {} (for [a arguments]
-             [a {:positional true :desc (argument-descriptions a)}])))
+             [a (assoc (argument-specs a)
+                       :positional true
+                       :ref (argument-ref a optional))])))
+
+(defn command-spec
+  "Everything one command parses: its arguments and the options only it reads.
+   The options legu itself takes are inherited from the dispatch level."
+  [{:keys [options] :as command}]
+  (merge (argument-spec command)
+         (select-keys command-options options)))
 
 (defn usage
   "legu's own help, generated from the table the parser reads. The first line
@@ -1290,8 +1343,9 @@
 (defn command-help
   "The help for one command. babashka.cli renders a command's own page from an
    entry that names no command, under a prog that does."
-  [cmds doc arguments]
-  (cli/format-command-help {:table [{:cmds [] :doc doc :spec (argument-spec arguments)}]
+  [{:keys [cmds doc] :as command}]
+  (cli/format-command-help {:table [{:cmds [] :doc doc
+                                     :spec (command-spec command)}]
                             :prog (str/join " " (cons "legu" cmds))
                             :spec options}))
 
@@ -1303,30 +1357,31 @@
 (defn dispatch-entry
   "A command's entry in the dispatch tree. --version and --help are answered
    here, in the order the parser they replace answered them: --version wins."
-  [{:keys [cmds run arguments doc]}]
+  [{:keys [cmds run arguments doc] :as command}]
   {:cmds cmds
    :doc doc
-   ;; No option belongs to one command yet, so this refuses only spellings legu
-   ;; has never had.
    :restrict true
    ;; babashka.cli stops reading options at the first argument no key claims,
    ;; so `legu mark <target> --reviewer NAME` reaches --reviewer only once
-   ;; <target> has a key. The values go straight back into :args; reading them
-   ;; from opts, and requiring them there, is lgu-01m238wskh6s.
+   ;; <target> has a key.
    :args->opts arguments
-   :spec (argument-spec arguments)
+   :spec (command-spec command)
+   ;; A word behind the terminator stays in :args, where no positional key
+   ;; reaches it, so the arguments are filled and counted here rather than by
+   ;; :require and :restrict-args. That is what keeps `legu status --
+   ;; -weird.txt` a path rather than a surplus argument.
    :fn (fn [{:keys [opts args]}]
-         (let [args (into (vec (take-while some? (map opts arguments))) args)
-               opts (apply dissoc opts arguments)
-               takes (count arguments)]
-           (cond
-             (:version opts) (print-version opts)
-             (:help opts) (println (command-help cmds doc arguments))
-             :else (do
-                     (when (> (count args) takes)
-                       (die (str (first cmds) " takes " takes " argument"
-                                 (if (= 1 takes) "" "s") ", got " (count args))))
-                     (run {:args args :opts opts})))))})
+         (cond
+           (:version opts) (print-version opts)
+           (:help opts) (println (command-help command))
+           :else (let [unfilled (remove #(contains? opts %) arguments)
+                       opts (merge opts (zipmap unfilled args))]
+                   (when-let [extra (nth args (count unfilled) nil)]
+                     (die (str "unexpected argument: " extra)))
+                   (when-let [message (or (missing-argument command opts)
+                                          (refused-argument command opts))]
+                     (die message))
+                   (run {:opts opts}))))})
 
 (def dispatch-table
   (conj (mapv dispatch-entry commands)
@@ -1346,7 +1401,7 @@
    set out to end."
   {:limit "--limit expects a positive integer"
    :order (str "--order expects one of "
-               (str/join ", " (sort (:enum (:order options)))))
+               (str/join ", " (:enum (:order command-options))))
    :reviewer "--reviewer needs a value"})
 
 (defn typed-flag
@@ -1357,17 +1412,36 @@
       (str/split #"=" 2)
       first))
 
+(defn refused-option
+  "What legu says about an option a command will not take. An option legu has
+   somewhere else is not unknown, and saying so sends the reader to the command
+   that does take it rather than to the spelling of the flag."
+  [typed dispatch]
+  (if-let [owners (and (contains? command-options (keyword (str/replace typed #"^--" "")))
+                       (seq (for [{:keys [cmds options]} commands
+                                  :when (some #{(keyword (str/replace typed #"^--" ""))} options)]
+                              (first cmds))))]
+    (if (seq dispatch)
+      (str (last dispatch) " does not take " typed)
+      (str typed " belongs to " (str/join " and " owners)
+           ", and stands after it"))
+    (str "unknown option: " typed)))
+
 (defn parse-error
   "legu's wording for a parse failure, so every one still reaches the reader
-   through die. Two causes are reworded rather than passed through: the library
-   names the token it could not place, legu names what the token was meant
-   to be."
+   through die, in legu's voice and in the same <target> and [<path>] the
+   command's help prints."
   [argv]
-  (fn [{:keys [cause msg option flag value]}]
-    (die (or (when (#{:coerce :validate} cause) (option-message option))
+  (fn [{:keys [cause msg option flag value dispatch]}]
+    (die (or (when (#{:coerce :validate} cause)
+               (or (option-message option)
+                   (when-let [command (command-named dispatch)]
+                     (when (some #{option} (:arguments command))
+                       (refused-value option (:optional command) value)))))
              (case cause
-               :restrict (str "unknown option: " (typed-flag flag argv))
-               :restrict-args (str "unknown command: " value)
+               :restrict (refused-option (typed-flag flag argv) dispatch)
+               ;; At the root the surplus word is not an argument at all.
+               :restrict-args (if (seq dispatch) msg (str "unknown command: " value))
                msg)))))
 
 (defn find-root
