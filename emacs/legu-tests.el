@@ -1531,6 +1531,25 @@ The record then anchors, stale, at 11-21."
 (defconst legu-test--hex64 "[0-9a-f]\\{64\\}")
 (defconst legu-test--iso "[0-9TZ:.-]+")
 
+(defun legu-test--record-regexp (region who &optional commit file-hash content-hash)
+  "A regexp for one record as the CLI lays it out.
+REGION is \"start END\" or nil for an opaque record; WHO is the reviewer
+or ticket field with its value, e.g. \":reviewer \\\"Ada\\\"\".  The
+timestamp, commit and hashes default to any well-formed value."
+  (concat "  {" (if region (concat ":start " region) ":opaque true") "\n"
+          "   " who " :timestamp \"" legu-test--iso "\"\n"
+          "   :commit \"" (or commit legu-test--hex40) "\"\n"
+          "   :file-hash \"" (or file-hash legu-test--hex64) "\""
+          (if region
+              (concat "\n   :content-hash \"" (or content-hash legu-test--hex64) "\"}\n")
+            "}\n")))
+
+(defun legu-test--sidecar-regexp (regions tickets)
+  "A regexp for a whole sidecar holding REGIONS and TICKETS record regexps."
+  (concat "\\`{:schema 2\n"
+          " :regions \\[\n" (apply #'concat regions) " \\]\n"
+          " :tickets \\[\n" (apply #'concat tickets) " \\]}\n\\'"))
+
 (defun legu-test--sidecar-text (root path)
   "The bytes of PATH's sidecar under ROOT, or nil when there is none."
   (let ((file (legu-sidecar-file root path)))
@@ -1553,21 +1572,9 @@ The record then anchors, stale, at 11-21."
     (legu-test--legu "ticket" "a.txt:12-14" "T-1")
     (let ((text (legu-test--sidecar-text root "a.txt")))
       (should (string-match-p
-               (concat "\\`{:schema 2\n"
-                       " :regions \\[\n"
-                       "  {:start 10 :end 20\n"
-                       "   :reviewer \"Ada\" :timestamp \"" legu-test--iso "\"\n"
-                       "   :commit \"" legu-test--hex40 "\"\n"
-                       "   :file-hash \"" legu-test--hex64 "\"\n"
-                       "   :content-hash \"" legu-test--hex64 "\"}\n"
-                       " \\]\n"
-                       " :tickets \\[\n"
-                       "  {:start 12 :end 14\n"
-                       "   :ticket \"T-1\" :timestamp \"" legu-test--iso "\"\n"
-                       "   :commit \"" legu-test--hex40 "\"\n"
-                       "   :file-hash \"" legu-test--hex64 "\"\n"
-                       "   :content-hash \"" legu-test--hex64 "\"}\n"
-                       " \\]}\n\\'")
+               (legu-test--sidecar-regexp
+                (list (legu-test--record-regexp "10 :end 20" ":reviewer \"Ada\""))
+                (list (legu-test--record-regexp "12 :end 14" ":ticket \"T-1\"")))
                text))
       (should-not (string-match-p ":path" text))
       (should-not (string-match-p "," text)))))
@@ -1580,19 +1587,9 @@ The record then anchors, stale, at 11-21."
       (legu-test--legu "ticket" path "T-1")
       (let ((text (legu-test--sidecar-text root path)))
         (should (string-match-p
-                 (concat "\\`{:schema 2\n"
-                         " :regions \\[\n"
-                         "  {:opaque true\n"
-                         "   :reviewer \"Ada\" :timestamp \"" legu-test--iso "\"\n"
-                         "   :commit \"" legu-test--hex40 "\"\n"
-                         "   :file-hash \"" legu-test--hex64 "\"}\n"
-                         " \\]\n"
-                         " :tickets \\[\n"
-                         "  {:opaque true\n"
-                         "   :ticket \"T-1\" :timestamp \"" legu-test--iso "\"\n"
-                         "   :commit \"" legu-test--hex40 "\"\n"
-                         "   :file-hash \"" legu-test--hex64 "\"}\n"
-                         " \\]}\n\\'")
+                 (legu-test--sidecar-regexp
+                  (list (legu-test--record-regexp nil ":reviewer \"Ada\""))
+                  (list (legu-test--record-regexp nil ":ticket \"T-1\"")))
                  text))
         (should (equal (legu--file-hash (expand-file-name path root))
                        (alist-get 'file-hash
@@ -1625,31 +1622,11 @@ The record then anchors, stale, at 11-21."
         (should (= 0 (nth 0 (legu-test--legu "forget" "a.txt:25-26"))))
         (let ((text (legu-test--sidecar-text root "a.txt")))
           (should (string-match-p
-                   (concat "\\`{:schema 2\n"
-                           " :regions \\[\n"
-                           "  {:start 10 :end 20\n"
-                           "   :reviewer \"Ada\" :timestamp \"2026-08-28T01:00:00Z\"\n"
-                           "   :commit \"abc\"\n"
-                           "   :file-hash \"" legu-test--hex64 "\"\n"
-                           "   :content-hash \"c\"}\n"
-                           "  {:start 10 :end 20\n"
-                           "   :reviewer \"Zed\" :timestamp \"2026-08-28T01:00:00Z\"\n"
-                           "   :commit \"abc\"\n"
-                           "   :file-hash \"" legu-test--hex64 "\"\n"
-                           "   :content-hash \"c\"}\n"
-                           " \\]\n"
-                           " :tickets \\[\n"
-                           "  {:start 10 :end 20\n"
-                           "   :ticket \"T-1\" :timestamp \"2026-08-28T01:00:00Z\"\n"
-                           "   :commit \"abc\"\n"
-                           "   :file-hash \"" legu-test--hex64 "\"\n"
-                           "   :content-hash \"c\"}\n"
-                           "  {:start 10 :end 20\n"
-                           "   :ticket \"T-2\" :timestamp \"2026-08-28T01:00:00Z\"\n"
-                           "   :commit \"abc\"\n"
-                           "   :file-hash \"" legu-test--hex64 "\"\n"
-                           "   :content-hash \"c\"}\n"
-                           " \\]}\n\\'")
+                   (legu-test--sidecar-regexp
+                    (list (legu-test--record-regexp "10 :end 20" ":reviewer \"Ada\"" "abc" nil "c")
+                          (legu-test--record-regexp "10 :end 20" ":reviewer \"Zed\"" "abc" nil "c"))
+                    (list (legu-test--record-regexp "10 :end 20" ":ticket \"T-1\"" "abc" nil "c")
+                          (legu-test--record-regexp "10 :end 20" ":ticket \"T-2\"" "abc" nil "c")))
                    text))
           (if first
               (should (equal first text))
