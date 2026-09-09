@@ -53,6 +53,13 @@
 (defn tracked-files []
   (or (split-z (git-ok "ls-files" "-z")) []))
 
+(def ^:private tracked-cache (atom nil))
+
+(defn tracked-set
+  "Tracked paths as a set, asked of git once per run."
+  []
+  (or @tracked-cache (reset! tracked-cache (set (tracked-files)))))
+
 (defn ignored-files
   "Tracked files matching .reviewignore. Gitignore syntax, matched by git itself."
   []
@@ -345,6 +352,20 @@
       {:renamed (if-let [r (get renames path)] [r] [])
        :added (if gone? (take 1000 added) [])})))
 
+(defn- may-have-moved?
+  "Could a record stored under `path` anchor somewhere else? True wherever
+   `candidate-paths` above has somewhere to look, decided without reading the
+   file: git calls the file renamed, which needs it untracked or deleted, or
+   nothing readable is there and the record may claim a file git calls added.
+   The one disagreement with `candidate-paths` is a file `fs/readable?` accepts
+   and `read-all-bytes` then refuses: gone there, present here, and a ghost
+   survives the mark that should have retired it."
+  [path]
+  (let [f (fs/file *root* path)]
+    (or (not (fs/regular-file? f))
+        (not (fs/readable? f))
+        (not ((tracked-set) path)))))
+
 (defn resolve-region
   "Current state of a stored record against the working tree.
    => {:state :reviewed|:stale|:missing :path :start :end :moved? :reason}"
@@ -583,14 +604,26 @@
                   (<= (:start region) (:start res))
                   (<= (:end res) (:end region)))))))
 
+(defn- can-hold-obsolete?
+  "Can `sidecar` hold a record an anchoring at `path` makes obsolete? Only its
+   own sidecar, and the ones whose file may have become it. Every other sidecar
+   answers for a file of its own, and anchoring its records could only put them
+   somewhere other than `path` — at a `git show` and a `git diff --no-index`
+   apiece."
+  [path sidecar]
+  (or (= sidecar path)
+      (and *git?* (may-have-moved? sidecar))))
+
 (defn- purge!
   "Drop every stored record that `obsolete?` says `region` makes obsolete,
    wherever its sidecar lives — a region re-reviewed after a rename must leave
-   no ghost."
+   no ghost. `obsolete?` answers for one path at a time, which is what lets the
+   sidecars that cannot hold an obsolete record go unanchored. Every sidecar is
+   still read, so a write names the ones legu cannot parse."
   [region kind obsolete?]
   (doseq [sidecar (stored-paths)
           :let [state (read-state sidecar)]
-          :when state
+          :when (and state (can-hold-obsolete? (:path region) sidecar))
           :let [keep? #(not (obsolete? region (assoc % :path sidecar)))
                 pruned (update state kind #(vec (filter keep? %)))]
           :when (not= state pruned)]
@@ -615,7 +648,7 @@
       (save-state! (update state :regions #(conj (vec %) record)))
       (when-let [why (cond
                        ((ignored-files) path) "is excluded by .reviewignore"
-                       (and *git?* (not ((set (tracked-files)) path))) "is not tracked by git")]
+                       (and *git?* (not ((tracked-set) path))) "is not tracked by git")]
         (binding [*out* *err*]
           (println (str "legu: " path " " why " and will not count toward coverage"))))
       (emit opts {:marked path :start start :end end :commit (:commit record)}

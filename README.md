@@ -186,6 +186,8 @@ tool, and the alternatives they rejected, are one paragraph each under
 ## Cost
 
 On a 700-file, 133k-line repository with ~1900 stored regions: `coverage` and
-`status` about 1s, `stale` about 1s, `mark` under 1s. Regions in files that have
-changed since they were read cost a `git show` and a diff each — with 80 files
-edited at once, the same commands take about 2s.
+`status` about 1s, `stale` about 1s, `mark` around a tenth of a second. Regions
+in files that have changed since they were read cost a `git show` and a diff
+each — with 80 files edited at once the read commands take about 2s, while
+`mark` does not move: it anchors only the records that could be sitting in the
+file it marks, never the whole store.

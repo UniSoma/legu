@@ -693,8 +693,11 @@ FILES is a list of (RELPATH . CONTENT).  Skips unless legu is installed."
         (let ((result (apply #'legu-test--legu args)))
           (should (/= 0 (nth 0 result)))
           (should (string-match-p "cannot read" (nth 2 result)))))
-      ;; A write to another file lands, and leaves the broken one untouched.
-      (should (= 0 (nth 0 (legu-test--legu "mark" "a.txt:6-8"))))
+      ;; A write to another file lands, names the sidecar it skipped, and
+      ;; leaves the broken one untouched.
+      (let ((result (legu-test--legu "mark" "a.txt:6-8")))
+        (should (= 0 (nth 0 result)))
+        (should (string-match-p "cannot read" (nth 2 result))))
       (should (equal bytes (with-temp-buffer (insert-file-contents sidecar)
                                              (buffer-string)))))))
 
@@ -1028,6 +1031,30 @@ The record then anchors, stale, at 11-21."
     (legu-test--legu "mark" "e.txt:1-40")
     (should (null (legu-test--stale-regions root)))
     (should (= 1 (length (plist-get (legu-sidecar-records root "e.txt") :regions))))))
+
+(ert-deftest legu-test-integration-a-mark-after-a-rename-leaves-no-ghost ()
+  ;; The record moved with the file, so the mark that re-reads it has to reach
+  ;; into the sidecar of the path it was stored under.
+  (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 40) "\n")))
+    (legu-test--legu "mark" "a.txt:10-20")
+    (legu-test--git "mv" "a.txt" "b.txt")
+    (legu-test--legu "mark" "b.txt")
+    (should (null (legu-test--stale-regions root)))
+    (should (= 1 (length (plist-get (legu-sidecar-records root "b.txt") :regions))))
+    (should (null (plist-get (legu-sidecar-records root "a.txt") :regions)))))
+
+(ert-deftest legu-test-integration-a-mark-after-a-rename-onto-a-recreated-path-leaves-no-ghost ()
+  ;; The old path is back, holding something else, so the file the record was
+  ;; stored under is neither missing nor tracked -- and git still calls it the
+  ;; rename source.
+  (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 40) "\n")))
+    (legu-test--legu "mark" "a.txt:10-20")
+    (legu-test--git "mv" "a.txt" "b.txt")
+    (with-temp-file (expand-file-name "a.txt" root) (insert "something else\n"))
+    (legu-test--legu "mark" "b.txt")
+    (should (null (legu-test--stale-regions root)))
+    (should (= 1 (length (plist-get (legu-sidecar-records root "b.txt") :regions))))
+    (should (null (plist-get (legu-sidecar-records root "a.txt") :regions)))))
 
 (ert-deftest legu-test-integration-typing-during-a-mark-keeps-the-alarm-up ()
   ;; The write callback used to clear the unverified flag unconditionally,
