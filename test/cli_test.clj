@@ -313,6 +313,191 @@
     (doseq [args [["--badopt"] ["status" "--badopt"] ["--badopt" "status"]]]
       (fails-with dir args "unknown option: --badopt"))))
 
+;; ---------------------------------------------------------------- completion
+
+;; babashka.cli derives these from the same table that parses a command line,
+;; so what is worth checking is not that a snippet exists but that what it
+;; offers is what legu accepts. The shells below run the snippet for real; the
+;; cases before them read the callback the snippet calls.
+
+(def ^:private shells ["bash" "zsh" "fish" "powershell" "nushell"])
+
+;; What every drive of completion is checked against, in one place: six copies
+;; of these lists meant six edits to add a command.
+(def ^:private offered-commands
+  ["mark" "ticket" "forget" "status" "regions" "stale" "next" "coverage"])
+
+(def ^:private offered-options
+  {"next" ["--limit" "--order" "--help" "--json" "--version"]
+   "status" ["--gaps" "--help" "--json" "--version"]
+   "mark" ["--reviewer" "--help" "--json" "--version"]})
+
+(def ^:private offered-orders ["dir" "cochange"])
+
+(defn- described
+  "The candidate column of what a shell printed, one per line, with the
+   description a shell shows beside it dropped."
+  [out]
+  (->> (str/split-lines out)
+       (remove str/blank?)
+       (mapv #(first (str/split % #"\t")))))
+
+(defn- snippet
+  "The init-file snippet legu emits for one shell."
+  [dir shell]
+  (legu! dir "org.babashka.cli/completions" "snippet" "--shell" shell))
+
+(defn- candidates
+  "What completion offers for a half-typed command line, one candidate per line
+   with its description stripped. words is the line after `legu`, ending in the
+   word being completed: \"\" for a fresh one."
+  [dir & words]
+  (let [{:keys [exit out]}
+        (apply legu! dir "org.babashka.cli/completions" "complete" "--shell" "bash" "--" words)]
+    (is (= 0 exit))
+    (described out)))
+
+(deftest a-snippet-is-emitted-for-every-shell-legu-names
+  (let [dir (scratch-repo!)]
+    (doseq [shell shells
+            :let [{:keys [exit out err]} (snippet dir shell)]]
+      (is (= [0 ""] [exit err]) shell)
+      (is (str/includes? out "org.babashka.cli/completions complete") shell)
+      (is (str/includes? out "legu") shell))))
+
+(deftest completion-offers-the-command-names
+  (let [dir (scratch-repo!)]
+    (is (= offered-commands (candidates dir "")))))
+
+(deftest completion-offers-only-the-options-the-command-takes
+  (let [dir (scratch-repo!)]
+    (doseq [[command expected] offered-options]
+      (is (= expected (candidates dir command "--")) command))
+    ;; The claim under all three: nothing offered is anything the command would
+    ;; turn down. An option legu has elsewhere is refused by name, so a wrong
+    ;; candidate shows up here as that refusal rather than as a missing flag.
+    (doseq [command (keys offered-options)
+            candidate (candidates dir command "--")
+            :let [{:keys [err]} (legu! dir command candidate "x")]]
+      (is (not (str/includes? err "does not take")) (str command " " candidate)))))
+
+(deftest completion-offers-the-orders-next-accepts
+  (let [dir (scratch-repo!)]
+    (is (= offered-orders (candidates dir "next" "--order" "")))))
+
+(defn- shell-path
+  "The directory the driven shells find legu in. The snippet completes the word
+   the reader types, and resolves the script from it, so the script has to be
+   reachable under its own name."
+  [dir]
+  (let [bin (fs/file dir "bin")]
+    (fs/create-dirs bin)
+    (when-not (fs/exists? (fs/file bin "legu"))
+      (fs/create-sym-link (fs/file bin "legu") legu))
+    (str bin)))
+
+(defn- shell-env [dir]
+  {"PATH" (str (shell-path dir) java.io.File/pathSeparator (System/getenv "PATH"))
+   ;; fish and zsh both write under $HOME on startup, and the home of whoever
+   ;; runs the suite is not the suite's to write to.
+   "HOME" dir})
+
+(defn- installed?
+  "Whether the shell is there to be driven. A missing one fails rather than
+   skipping: completion is unchecked either way, and a skip that reports green
+   is indistinguishable from a shell that answered."
+  [shell]
+  (or (some? (fs/which shell))
+      (do (is false (str "no " shell " on PATH, so its completion went unchecked"))
+          false)))
+
+(deftest bash-completes-a-command-line-through-the-snippet
+  (when (installed? "bash")
+    (let [dir (scratch-repo!)
+          driver (fs/file dir "drive.bash")]
+      (spit (fs/file dir "snippet.bash") (:out (snippet dir "bash")))
+      ;; The snippet registers a function against the word `legu`; calling it
+      ;; with the words and the cursor bash would have set is what pressing TAB
+      ;; does. --norc keeps whatever the runner has in ~/.bashrc out of it.
+      (spit driver (str "source \"$HOME/snippet.bash\"\n"
+                        "COMP_WORDS=(\"$@\"); COMP_CWORD=$(( $# - 1 )); COMPREPLY=()\n"
+                        "_babashka_cli_complete_legu\n"
+                        "printf '%s\\n' \"${COMPREPLY[@]}\"\n"))
+      (let [offered (fn [& words]
+                      (let [{:keys [exit out]}
+                            (apply p/sh {:dir dir :out :string :err :string
+                                         :extra-env (shell-env dir)}
+                                   "bash" "--norc" "--noprofile" (str driver) "legu" words)]
+                        (is (= 0 exit))
+                        (described out)))]
+        (is (= offered-commands (offered "")))
+        (doseq [[command expected] offered-options]
+          (is (= expected (offered command "--")) command))
+        (is (= offered-orders (offered "next" "--order" "")))))))
+
+(deftest fish-completes-a-command-line-through-the-snippet
+  (when (installed? "fish")
+    (let [dir (scratch-repo!)
+          autoloaded (fs/file dir ".config" "fish" "completions" "legu.fish")]
+      ;; The snippet goes where the README puts it: the directory fish reads a
+      ;; command's completions from without being told to.
+      (fs/create-dirs (fs/parent autoloaded))
+      (spit autoloaded (:out (snippet dir "fish")))
+      ;; complete -C asks fish for the candidates it would show for a line,
+      ;; through the same machinery a TAB goes through.
+      (let [offered (fn [line]
+                      (let [{:keys [exit out]}
+                            (p/sh {:dir dir :out :string :err :string
+                                   :extra-env (shell-env dir)}
+                                  "fish" "-c" (str "complete -C '" line "'"))]
+                        (is (= 0 exit))
+                        (->> (str/split-lines out)
+                             (remove str/blank?)
+                             (mapv #(first (str/split % #"\t"))))))]
+        (is (= ["mark" "ticket" "forget" "status" "regions" "stale" "next" "coverage"]
+               (offered "legu ")))
+        (is (= ["--limit" "--order" "--help" "--json" "--version"] (offered "legu next --")))
+        (is (= ["--gaps" "--help" "--json" "--version"] (offered "legu status --")))
+        (is (= ["dir" "cochange"] (offered "legu next --order ")))))))
+
+(deftest zsh-completes-a-command-line-through-the-snippet
+  (when (installed? "zsh")
+    (let [dir (scratch-repo!)
+          driver (str (fs/file (fs/parent legu) "test" "complete_in_zsh.zsh"))]
+      (spit (fs/file dir "snippet.zsh") (:out (snippet dir "zsh")))
+      ;; The snippet goes where a reader is told to put it: an init file the
+      ;; interactive shell reads at startup.
+      (spit (fs/file dir ".zshrc")
+            (str "autoload -Uz compinit; compinit -u -D\n"
+                 "unsetopt beep\n"
+                 "source " (fs/file dir "snippet.zsh") "\n"))
+      (let [offered (fn [line]
+                      (let [{:keys [exit out]}
+                            (p/sh {:dir dir :out :string :err :string
+                                   :extra-env (shell-env dir)}
+                                  "zsh" "-f" driver line)]
+                        (is (= 0 exit) line)
+                        ;; zsh paints a menu rather than printing a list, so
+                        ;; these are substring checks. An empty screen would
+                        ;; satisfy every "does not offer" among them, so it is
+                        ;; ruled out once, here.
+                        (is (not (str/blank? out)) line)
+                        out))]
+        (let [names (offered "legu ")]
+          (doseq [named offered-commands]
+            (is (str/includes? names named) named)))
+        (doseq [[command expected] offered-options
+                :let [painted (offered (str "legu " command " --"))]]
+          (doseq [named expected]
+            (is (str/includes? painted named) (str command " " named)))
+          ;; The point of the ticket: an option another command owns is not
+          ;; offered for this one.
+          (doseq [absent (remove (set expected) (distinct (apply concat (vals offered-options))))]
+            (is (not (str/includes? painted absent)) (str command " " absent))))
+        (let [orders (offered "legu next --order ")]
+          (doseq [order offered-orders]
+            (is (str/includes? orders order) order)))))))
+
 ;; ---------------------------------------------------------------- babashka
 
 ;; The only cases in this file that reach into legu instead of driving it: no

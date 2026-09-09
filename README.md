@@ -20,6 +20,38 @@ babashka 1.13.220 or newer, and git. Nothing else.
 cp legu ~/.local/bin/legu   # anywhere on PATH
 ```
 
+## Shell completion
+
+legu completes command names, the options each command takes, and the values
+`--order` accepts. It builds them from the same table that parses the command
+line, so they stay right as legu grows options.
+
+Add one line to your shell's init file.
+
+bash, in `~/.bashrc`:
+
+```
+source <(legu org.babashka.cli/completions snippet --shell bash)
+```
+
+zsh, in `~/.zshrc`, below the `compinit` call:
+
+```
+source <(legu org.babashka.cli/completions snippet --shell zsh)
+```
+
+fish reads completions from a file instead. Run this once — fish does not
+create the directory itself:
+
+```
+mkdir -p ~/.config/fish/completions && legu org.babashka.cli/completions snippet --shell fish > ~/.config/fish/completions/legu.fish
+```
+
+Open a new shell, then type `legu ` and press TAB.
+
+`--shell` also emits snippets for `powershell` and `nushell`. Those two ship
+untested: legu is verified against bash, zsh and fish.
+
 ## Use
 
 ```
@@ -334,6 +366,13 @@ The CLI suite records what `legu` does with a command line: how each option is
 parsed and where it may appear, how many arguments each command takes, and the
 exit code and message behind every error. It needs babashka and git, builds its
 own scratch repositories, and exits non-zero when any assertion fails.
+
+It also drives shell completion through the shells themselves, and so needs
+bash, zsh and fish on PATH: zsh runs interactively on a pseudo-terminal with the
+snippet in its `.zshrc` and is sent a real TAB, bash sources the snippet and is
+asked what it would have offered, and fish is asked through `complete -C`
+against the file the section above installs. A shell that is missing fails the
+suite rather than passing quietly, since completion is then unchecked.
 
 The Emacs package has its own ERT suite, documented under
 [emacs/README.md](emacs/README.md#tests).
