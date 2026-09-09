@@ -18,8 +18,11 @@
 (def NUL #"\u0000")
 
 ;; What `git log --format` prints ahead of each commit's file list. Any byte
-;; git will not emit inside a path would do; this one cannot appear in one.
+;; git will not emit inside a path would do. git refuses the raw byte in a
+;; format string, so the format spells it as an escape derived from this one
+;; rather than as a second literal that could drift from it.
 (def SENTINEL "\u0001")
+(def SENTINEL-FORMAT (format "--format=%%x%02x" (int (first SENTINEL))))
 
 ;; Files are decoded as latin-1 so every byte round-trips: a change in a
 ;; non-UTF-8 byte must not be invisible to the content hash.
@@ -116,12 +119,13 @@
         c)))
 
 (defn commit-file-sets
-  "The paths changed by each commit, one set per commit, from one `git log`
-   over the whole history. A merge lists nothing, which is what we want: a
-   merge commit would otherwise read as every file on the branch changing
-   together."
+  "The paths changed by each commit that changed more than one, one set per
+   commit, from one `git log` over the whole history. A commit touching a
+   single file says nothing about what changes together, and a merge lists
+   nothing at all — which is what we want, since a merge would otherwise read
+   as every file on the branch changing together."
   []
-  (->> (str/split (or (git-ok "log" "--name-only" "-z" "--format=%x01") "") NUL)
+  (->> (str/split (or (git-ok "log" "--name-only" "-z" SENTINEL-FORMAT) "") NUL)
        ;; A commit's own token is the sentinel; the newline git puts between it
        ;; and the first path rides on whichever token comes next.
        (reduce (fn [acc t]
@@ -1071,7 +1075,7 @@
                                  (:path r) (fmt-region r)
                                  (name (:state r)) (:reason r)))))))))
 
-(defn- read-paths
+(defn- reviewed-paths
   "Paths carrying a reviewed line, current or stale, at their location now."
   [by-path]
   (set (for [[path states] by-path
@@ -1081,15 +1085,15 @@
 (defn cochange-scores
   "path -> the number of commits in which it changed alongside a file that
    already carries a reviewed line. A file never scores itself: a commit
-   touching one read file and nothing else says nothing about what to read
+   touching one reviewed file and nothing else says nothing about what to read
    next. Git history only — no language knows what a file means here."
-  [already-read]
+  [already-reviewed]
   (reduce (fn [acc paths]
-            (let [read-here (set/intersection paths already-read)]
-              (if (empty? read-here)
+            (let [here (set/intersection paths already-reviewed)]
+              (if (empty? here)
                 acc
                 (reduce (fn [a p]
-                          (if (= #{p} read-here)
+                          (if (= #{p} here)
                             a
                             (update a p (fnil inc 0))))
                         acc paths))))
@@ -1097,38 +1101,38 @@
           (commit-file-sets)))
 
 (defn cmd-next [{:keys [opts]}]
-  (let [order (or (:order opts) "dir")
-        _ (when (and (= "cochange" order) (not *git?*))
-            (die "--order cochange needs git to read commit history"))
-        by-path (resolved-by-path)
-        limit (or (:limit opts) 20)
-        ;; Directory order is the tiebreak under every ordering, so with
-        ;; nothing read yet cochange order is directory order.
-        scores (if (= "cochange" order) (cochange-scores (read-paths by-path)) {})
-        rank (fn [f] [(- (get scores (:path f) 0))
-                      (str (fs/parent (fs/path (:path f))))
-                      (:path f)])
-        gaps (->> (eligible-files)
-                  (map #(file-coverage by-path %))
-                  (filter #(pos? (+ (:unreviewed %) (:stale %))))
-                  (sort-by rank)
-                  (take limit)
-                  (mapv (fn [f]
-                          (assoc f :todo (into (sorted-set)
-                                               (remove (:reviewed-lines f)
-                                                       (range 1 (inc (:total f)))))))))]
-    (emit opts {:next (mapv (fn [f] {:path (:path f)
-                                     :unreviewed (:unreviewed f)
-                                     :stale (:stale f)
-                                     :ranges (fmt-ranges (:todo f))})
-                            gaps)}
-          (fn [_]
-            (if (empty? gaps)
-              (println "everything is reviewed and current")
-              (doseq [f gaps]
-                (println (format "%-52s %5d unread %5d stale  %s"
-                                 (:path f) (:unreviewed f) (:stale f)
-                                 (fmt-ranges (:todo f))))))))))
+  (let [cochange? (= "cochange" (:order opts))]
+    (when (and cochange? (not *git?*))
+      (die "--order cochange needs git to read commit history"))
+    (let [by-path (resolved-by-path)
+          limit (or (:limit opts) 20)
+          ;; Directory order is the tiebreak under every ordering, so with
+          ;; nothing reviewed yet cochange order is directory order.
+          scores (if cochange? (cochange-scores (reviewed-paths by-path)) {})
+          rank (fn [f] [(- (get scores (:path f) 0))
+                        (str (fs/parent (fs/path (:path f))))
+                        (:path f)])
+          gaps (->> (eligible-files)
+                    (map #(file-coverage by-path %))
+                    (filter #(pos? (+ (:unreviewed %) (:stale %))))
+                    (sort-by rank)
+                    (take limit)
+                    (mapv (fn [f]
+                            (assoc f :todo (into (sorted-set)
+                                                 (remove (:reviewed-lines f)
+                                                         (range 1 (inc (:total f)))))))))]
+      (emit opts {:next (mapv (fn [f] {:path (:path f)
+                                       :unreviewed (:unreviewed f)
+                                       :stale (:stale f)
+                                       :ranges (fmt-ranges (:todo f))})
+                              gaps)}
+            (fn [_]
+              (if (empty? gaps)
+                (println "everything is reviewed and current")
+                (doseq [f gaps]
+                  (println (format "%-52s %5d unread %5d stale  %s"
+                                   (:path f) (:unreviewed f) (:stale f)
+                                   (fmt-ranges (:todo f)))))))))))
 
 (defn cmd-coverage [{:keys [opts]}]
   (let [by-path (resolved-by-path)
@@ -1169,7 +1173,8 @@
              "  --order <o>        `next` order: dir (default) or cochange"
              "  --gaps             hide files read in full from `status`"]))
 
-;; A set of strings is a flag that takes one of a fixed set of values.
+;; A set of strings is a flag taking one of a fixed set of values; the set is
+;; also what the error names when the value is not one of them.
 (def flags {"--json" :flag "--help" :flag "--gaps" :flag "--version" :flag
             "--reviewer" :value "--limit" :int
             "--order" #{"dir" "cochange"}})
@@ -1192,22 +1197,21 @@
                 inline (when i (subs a (inc i)))
                 kw (keyword (subs k 2))
                 t (get flags k)]
-            (if (set? t)
-              (let [v (or inline (first more))]
-                (when-not (t v)
-                  (die (str k " expects one of " (str/join ", " (sort t)))))
-                (recur (seq (if inline more (rest more))) (assoc opts kw v) args))
-              (case t
-                :flag (recur (seq more) (assoc opts kw (not= "false" inline)) args)
-                :value (let [v (or inline (first more))]
-                         (when (str/blank? v) (die (str k " needs a value")))
-                         (recur (seq (if inline more (rest more))) (assoc opts kw v) args))
-                :int (let [v (or inline (first more))
-                           n (parse-long (str v))]
-                       (when-not (and n (pos? n))
-                         (die (str k " expects a positive integer")))
-                       (recur (seq (if inline more (rest more))) (assoc opts kw n) args))
-                (die (str "unknown option: " k)))))
+            (case (if (set? t) :enum t)
+              :flag (recur (seq more) (assoc opts kw (not= "false" inline)) args)
+              :value (let [v (or inline (first more))]
+                       (when (str/blank? v) (die (str k " needs a value")))
+                       (recur (seq (if inline more (rest more))) (assoc opts kw v) args))
+              :enum (let [v (or inline (first more))]
+                      (when-not (t v)
+                        (die (str k " expects one of " (str/join ", " (sort t)))))
+                      (recur (seq (if inline more (rest more))) (assoc opts kw v) args))
+              :int (let [v (or inline (first more))
+                         n (parse-long (str v))]
+                     (when-not (and n (pos? n))
+                       (die (str k " expects a positive integer")))
+                     (recur (seq (if inline more (rest more))) (assoc opts kw n) args))
+              (die (str "unknown option: " k))))
 
           (and (str/starts-with? a "-") (not= a "-"))
           (die (str "unknown option: " a))

@@ -127,5 +127,5 @@ _Avoid_: hole, todo
 **Queue**:
 What to read next: the files with gaps, in a chosen order — directory order by
 default, or by how often each file has changed in the same commit as something
-already read.
+already reviewed.
 _Avoid_: reading list, worklist, todo, backlog
