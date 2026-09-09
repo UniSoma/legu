@@ -113,6 +113,24 @@ tree — committed alongside the code. Source files are never modified.
  :tickets [{:start 40 :end 95 :ticket "lgu-01k7" :commit "a1b2c3…" …}]}
 ```
 
+legu skips a sidecar it cannot parse — most often one with a merge conflict
+left in it — instead of dying on it. `status`, `stale`, `next` and `coverage`
+answer for every other file and exit 0; `mark`, `ticket` and `forget` leave that
+sidecar alone and do their work everywhere else. Every command names what it
+skipped on stderr and adds an `errors` key to its `--json`:
+
+```json
+{"files": [...], "tickets": [...],
+ "errors": [{"file": ".review/src/core.clj.edn",
+             "reason": "not a review record"}]}
+```
+
+Paths there are relative to the repo root, one entry per file, and the key is
+absent when there is nothing to report. A file whose sidecar legu cannot read
+leaves the counts entirely: calling it never read would send `next` back to a
+file you have already read. The one command that still refuses is a write to
+the unreadable sidecar itself: writing it would drop the state it still holds.
+
 One file per source file rather than a single index, so two people reviewing at
 once do not conflict on every mark. A file with no line ranges — a binary, or an
 empty file — is stored as one opaque region (`:opaque true`) matched on the
@@ -161,6 +179,9 @@ tool, and the alternatives they rejected, are one paragraph each under
 - Paths containing a newline are rejected; they cannot round-trip the store.
 - Marks on files excluded by `.reviewignore`, or on untracked files, are stored
   and warned about, but do not count toward coverage.
+- A mark cannot retire a record held in a sidecar it could not read, so that
+  record survives as a ghost until the sidecar is fixed. The mark still lands,
+  and names the sidecar it skipped.
 
 ## Cost
 

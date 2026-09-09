@@ -156,26 +156,67 @@
 
 ;; ---------------------------------------------------------------- store
 
-(defn store-file [path]
-  (fs/file *root* ".review" (str path ".edn")))
+(defn store-path
+  "Where `path`'s sidecar lives, relative to the repo root."
+  [path]
+  (str ".review/" path ".edn"))
 
-(defn load-state [path]
+(defn store-file [path]
+  (fs/file *root* (store-path path)))
+
+;; Sidecars are committed alongside the code, so a merge conflict in one is
+;; expected. Reading collects them here and answers for every other file;
+;; writing still refuses, because a write over a sidecar legu cannot parse
+;; would drop the state it holds.
+(def ^:private store-errors (atom (sorted-map)))
+
+(defn- parse-sidecar
+  "{:state s} for a sidecar legu can read, {:error reason} for one it cannot."
+  [f]
+  (let [[v unreadable] (try [(edn/read-string (slurp f)) nil]
+                            (catch Exception e [nil (ex-message e)]))
+        bad-range (some (fn [r]
+                          (when-not (or (:opaque r)
+                                        (and (int? (:start r)) (int? (:end r))
+                                             (pos? (:start r)) (<= (:start r) (:end r))))
+                            (str "bad line range in " (pr-str r))))
+                        (when (map? v) (concat (:regions v) (:tickets v))))]
+    (cond
+      unreadable {:error unreadable}
+      (not (map? v)) {:error "not a review record"}
+      (contains? v :notes) {:error ":notes was renamed to :tickets (ADR-0012)"}
+      bad-range {:error bad-range}
+      :else {:state v})))
+
+(defn- blank-state [path]
+  {:schema 1 :path path :regions [] :tickets []})
+
+(defn load-state
+  "The sidecar of `path`, dying when it cannot be read. For writers."
+  [path]
   (let [f (store-file path)]
     (if (fs/exists? f)
-      (let [v (try (edn/read-string (slurp f))
-                   (catch Exception e
-                     (die (str "cannot read " f ": " (ex-message e)))))]
-        (when-not (map? v)
-          (die (str "cannot read " f ": not a review record")))
-        (when (contains? v :notes)
-          (die (str "cannot read " f ": :notes was renamed to :tickets (ADR-0012)")))
-        (doseq [r (concat (:regions v) (:tickets v))]
-          (when-not (or (:opaque r)
-                        (and (int? (:start r)) (int? (:end r))
-                             (pos? (:start r)) (<= (:start r) (:end r))))
-            (die (str "cannot read " f ": bad line range in " (pr-str r)))))
-        v)
-      {:schema 1 :path path :regions [] :tickets []})))
+      (let [{:keys [state error]} (parse-sidecar f)]
+        (or state (die (str "cannot read " f ": " error))))
+      (blank-state path))))
+
+(defn read-state
+  "The sidecar of `path`, or nil when it cannot be read — recorded under
+   `store-errors` for `emit` to report. Never hand a nil to `save-state!`:
+   it would remove the sidecar and the state that is still in it."
+  [path]
+  (let [f (store-file path)]
+    (if (fs/exists? f)
+      (let [{:keys [state error]} (parse-sidecar f)]
+        (or state (do (swap! store-errors assoc path error) nil)))
+      (blank-state path))))
+
+(defn assert-readable!
+  "Die unless `path`'s sidecar can be read. A write runs this before it
+   touches anything: one that cannot land must change nothing."
+  [path]
+  (load-state path)
+  nil)
 
 (defn save-state!
   "Writes the sidecar, or removes it when nothing is left to record."
@@ -349,14 +390,14 @@
   "Every stored review record, with :path merged in."
   []
   (vec (for [path (stored-paths)
-             r (:regions (load-state path))]
+             r (:regions (read-state path))]
          (assoc r :path path))))
 
 (defn ticket-records
   "Every stored ticket reference, with :path merged in."
   []
   (vec (for [path (stored-paths)
-             t (:tickets (load-state path))]
+             t (:tickets (read-state path))]
          (assoc t :path path))))
 
 (defn- walk-files
@@ -368,13 +409,23 @@
        (remove #(or (re-find #"(^|/)\.git/" %) (str/starts-with? % ".review/")))
        sort vec))
 
+(defn skipped-paths
+  "Paths whose sidecar legu could not read. Their review state is unknown, so
+   they are left out of the counts rather than reported as never read — the
+   `errors` key is what says they are missing from the numbers."
+  []
+  (run! read-state (stored-paths))
+  (set (keys @store-errors)))
+
 (defn eligible-files
   "Files whose lines count toward coverage, with their line counts."
   []
   (let [ignored (ignored-files)
+        skipped (skipped-paths)
         all (if *git?* (tracked-files) (walk-files))]
     (vec (for [p all
                :when (and (not (ignored p))
+                          (not (skipped p))
                           (not (str/starts-with? p ".review/"))
                           (not= p ".reviewignore"))]
            (let [c (read-worktree p)]
@@ -464,9 +515,15 @@
   (if start (str ":" start "-" end) ""))
 
 (defn emit [opts data render]
-  (if (:json opts)
-    (println (json/generate-string data {:pretty true}))
-    (render data)))
+  (doseq [[path reason] @store-errors]
+    (binding [*out* *err*]
+      (println (str "legu: cannot read " (store-file path) ": " reason))))
+  (let [errors (vec (for [[path reason] @store-errors]
+                      {:file (store-path path) :reason reason}))
+        data (cond-> data (seq errors) (assoc :errors errors))]
+    (if (:json opts)
+      (println (json/generate-string data {:pretty true}))
+      (render data))))
 
 ;; ---------------------------------------------------------------- commands
 
@@ -532,8 +589,9 @@
    no ghost."
   [region kind obsolete?]
   (doseq [sidecar (stored-paths)
-          :let [state (load-state sidecar)
-                keep? #(not (obsolete? region (assoc % :path sidecar)))
+          :let [state (read-state sidecar)]
+          :when state
+          :let [keep? #(not (obsolete? region (assoc % :path sidecar)))
                 pruned (update state kind #(vec (filter keep? %)))]
           :when (not= state pruned)]
     (save-state! (assoc pruned :path sidecar))))
@@ -542,6 +600,7 @@
   (when-not (first args) (die "mark needs a path"))
   (let [{:keys [path start end opaque cur]} (region-of (first args))
         whole? (or opaque (and (= 1 start) (= end (count (:lines cur)))))]
+    (assert-readable! path)
     (purge! {:path path :start start :end end :whole? whole?} :regions contained?)
     (let [state (load-state path)
           record (cond-> {:start start :end end
@@ -571,6 +630,7 @@
     (when-not t (die "ticket needs a path"))
     (when (str/blank? ticket) (die "ticket needs a ticket id"))
     (let [{:keys [path start end opaque cur]} (region-of t)]
+      (assert-readable! path)
       (purge! {:path path :start start :end end} :tickets
               (fn [region r] (and (= ticket (:ticket r)) (superseded? region r))))
       (let [state (load-state path)
@@ -602,9 +662,11 @@
                              (or (nil? start)
                                  (and (= start (:start r)) (= end (:end r))))))
         dropped (atom 0)]
+    (assert-readable! path)
     (doseq [sidecar (stored-paths)
-            :let [state (load-state sidecar)
-                  keep? (fn [r]
+            :let [state (read-state sidecar)]
+            :when state
+            :let [keep? (fn [r]
                           (if (or (stored-match? sidecar r)
                                   (and start (same-region? region (assoc r :path sidecar))))
                             (do (swap! dropped inc) false)

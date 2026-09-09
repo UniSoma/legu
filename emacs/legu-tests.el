@@ -341,8 +341,53 @@
       (setq-local legu--scope 'out)
       (should (equal (substring-no-properties (legu--lighter)) " legu —"))
       (setq-local legu--scope 'in)
+      ;; A broken sidecar flags the store without taking the numbers away.
+      (puthash "/tmp/x/" (list :coverage (list :lines 1000 :reviewed 618 :stale 20
+                                               :never 362 :files 5)
+                               :errors (list (list :file ".review/b.txt.edn"
+                                                   :reason "not a review record")))
+               legu--snapshots)
+      (should (equal (substring-no-properties (legu--lighter)) " legu 61%!"))
       (puthash "/tmp/x/" (list :state 'error) legu--snapshots)
       (should (equal (substring-no-properties (legu--lighter)) " legu!")))))
+
+(ert-deftest legu-test-list-banner-is-driven-by-errors ()
+  (let ((legu--snapshots (make-hash-table :test #'equal)))
+    (puthash "/tmp/x/"
+             (list :state 'fresh :started (current-time)
+                   :coverage (list :lines 10 :reviewed 5 :stale 0 :never 5 :files 1)
+                   :errors (list (list :file ".review/b.txt.edn"
+                                       :reason "not a review record")))
+             legu--snapshots)
+    (with-temp-buffer
+      (legu-list-mode)
+      (setq legu-list--root "/tmp/x/")
+      (legu-list--render)
+      (let ((text (substring-no-properties (buffer-string))))
+        (should (string-match-p "\\.review/b\\.txt\\.edn" text))
+        (should (string-match-p "not a review record" text))
+        ;; The numbers next to it are this snapshot's, not the last good one's.
+        (should (string-match-p "read +5" text))
+        (should-not (string-match-p "last good snapshot" text))
+        (should-not (string-match-p "every legu command is failing" text))))))
+
+(ert-deftest legu-test-list-banner-prefers-a-snapshot-with-no-numbers ()
+  ;; A snapshot that failed outright must not show the sidecar list a partial
+  ;; one left behind: the numbers under it are nobody's.
+  (let ((legu--snapshots (make-hash-table :test #'equal)))
+    (puthash "/tmp/x/"
+             (list :state 'error :started (current-time)
+                   :error (list :kind 'cli-failed :message "legu: git not found")
+                   :errors (list (list :file ".review/b.txt.edn" :reason "stale")))
+             legu--snapshots)
+    (with-temp-buffer
+      (legu-list-mode)
+      (setq legu-list--root "/tmp/x/")
+      (legu-list--render)
+      (let ((text (substring-no-properties (buffer-string))))
+        (should (string-match-p "every legu command is failing" text))
+        (should (string-match-p "git not found" text))
+        (should-not (string-match-p "b\\.txt\\.edn" text))))))
 
 
 ;;;; JSON edge cases
@@ -576,28 +621,82 @@ FILES is a list of (RELPATH . CONTENT).  Skips unless legu is installed."
     (let ((data (legu--parse-json (nth 1 (legu-test--legu "status" "b.txt" "--json")))))
       (should (null (alist-get 'files data))))))
 
-(ert-deftest legu-test-integration-broken-store-is-survivable ()
+(defun legu-test--break-sidecar (root path)
+  "Overwrite PATH's sidecar under ROOT with an unmerged conflict."
+  (with-temp-file (expand-file-name (concat ".review/" path ".edn") root)
+    (insert "<<<<<<< HEAD\n{:schema 1}\n=======\nnonsense\n>>>>>>> other\n")))
+
+(ert-deftest legu-test-integration-one-broken-sidecar-does-not-down-the-cli ()
   (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 10) "\n"))
                               (cons "b.txt" (concat (legu-test--lines 10) "\n")))
     (legu-test--legu "mark" "a.txt:1-5")
     (legu-test--legu "mark" "b.txt:1-5")
-    (with-temp-file (expand-file-name ".review/b.txt.edn" root)
-      (insert "<<<<<<< HEAD\n{:schema 1}\n=======\nnonsense\n>>>>>>> other\n"))
-    (let ((result (legu-test--legu "status" "--json")))
-      (should (/= 0 (nth 0 result)))
-      (should (string-empty-p (string-trim (nth 1 result))))
-      (should (string-match legu--broken-store-rx (nth 2 result))))
-    ;; The CLI is down, but the other file still paints from its own sidecar.
+    ;; A clean store says nothing, so the key is absent rather than empty.
+    (should-not (assq 'errors (legu--parse-json
+                               (nth 1 (legu-test--legu "status" "--json")))))
+    (legu-test--break-sidecar root "b.txt")
+    ;; Every read command answers for everything else, and names the file.
+    (dolist (command '("status" "stale" "next" "coverage"))
+      (let ((result (legu-test--legu command "--json")))
+        (should (= 0 (nth 0 result)))
+        (should (legu--parse-json (nth 1 result)))
+        (should (string-match-p "cannot read" (nth 2 result))))
+      ;; The human renderer names it too.
+      (should (string-match-p "cannot read" (nth 2 (legu-test--legu command)))))
+    (let* ((data (legu--parse-json (nth 1 (legu-test--legu "status" "--json"))))
+           (a (seq-find (lambda (f) (equal "a.txt" (alist-get 'path f)))
+                        (alist-get 'files data)))
+           (errors (alist-get 'errors data)))
+      (should (= 5 (alist-get 'reviewed a)))
+      ;; Its state is unknown, so it is left out rather than called unread --
+      ;; otherwise `next' sends the reviewer back to a file already marked.
+      (should-not (seq-find (lambda (f) (equal "b.txt" (alist-get 'path f)))
+                            (alist-get 'files data)))
+      ;; Root-relative, once per file however many times it was loaded.
+      (should (equal '(".review/b.txt.edn")
+                     (mapcar (lambda (e) (alist-get 'file e)) errors)))
+      (should (stringp (alist-get 'reason (car errors)))))
+    (let ((cov (legu--parse-json (nth 1 (legu-test--legu "coverage" "--json")))))
+      (should (= 5 (alist-get 'reviewed cov)))
+      (should (= 10 (alist-get 'eligible-lines cov))))
+    (should-not (seq-find (lambda (f) (equal "b.txt" (alist-get 'path f)))
+                          (alist-get 'next (legu--parse-json
+                                            (nth 1 (legu-test--legu "next" "--json"))))))
+    ;; The other file still paints from its own sidecar.
     (should (equal '((1 . 5))
                    (plist-get (legu--tier0 root "a.txt" (expand-file-name "a.txt" root))
                               :reviewed)))
     (should-not (plist-get (legu-sidecar-records root "b.txt") :ok))
-    ;; And the package records the error rather than looking dead.
+    ;; And the package keeps every number live while flagging the file.
     (legu-refresh-snapshot root)
     (should (legu-test--wait
-             (lambda () (eq 'error (plist-get (legu-snapshot root) :state)))))
-    (should (equal 'broken-store
-                   (plist-get (plist-get (legu-snapshot root) :error) :kind)))))
+             (lambda () (plist-get (legu-snapshot root) :errors))))
+    (should (eq 'fresh (plist-get (legu-snapshot root) :state)))
+    (should (equal '(".review/b.txt.edn")
+                   (mapcar (lambda (e) (plist-get e :file))
+                           (plist-get (legu-snapshot root) :errors))))
+    (should (= 5 (plist-get (legu-coverage-numbers root) :reviewed)))))
+
+(ert-deftest legu-test-integration-a-write-to-a-broken-sidecar-is-refused ()
+  ;; Skipping the file on a read loses nothing; skipping it on a write would
+  ;; drop the state it still holds.
+  (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 10) "\n"))
+                              (cons "b.txt" (concat (legu-test--lines 10) "\n")))
+    (legu-test--legu "mark" "a.txt:1-5")
+    (legu-test--legu "mark" "b.txt:1-5")
+    (legu-test--break-sidecar root "b.txt")
+    (let* ((sidecar (expand-file-name ".review/b.txt.edn" root))
+           (bytes (with-temp-buffer (insert-file-contents sidecar) (buffer-string))))
+      (dolist (args '(("mark" "b.txt:6-8")
+                      ("ticket" "b.txt:6-8" "T-1")
+                      ("forget" "b.txt:1-5")))
+        (let ((result (apply #'legu-test--legu args)))
+          (should (/= 0 (nth 0 result)))
+          (should (string-match-p "cannot read" (nth 2 result)))))
+      ;; A write to another file lands, and leaves the broken one untouched.
+      (should (= 0 (nth 0 (legu-test--legu "mark" "a.txt:6-8"))))
+      (should (equal bytes (with-temp-buffer (insert-file-contents sidecar)
+                                             (buffer-string)))))))
 
 (ert-deftest legu-test-integration-awkward-paths-round-trip ()
   (legu-test--with-repo (list (cons "weird dir/spa ce'quote\"and:12-14.txt" "one\ntwo\n"))
@@ -905,9 +1004,15 @@ The record then anchors, stale, at 11-21."
       (make-directory (file-name-directory sidecar) t)
       (with-temp-file sidecar
         (insert "{:schema 1 :path \"a.txt\" :regions [] :notes []}\n")))
-    (let ((result (legu-test--legu "status")))
-      (should (/= 0 (nth 0 result)))
-      (should (string-match-p "cannot read" (nth 2 result))))
+    (let ((result (legu-test--legu "status" "--json")))
+      (should (= 0 (nth 0 result)))
+      (should (string-match-p "cannot read" (nth 2 result)))
+      (should (string-match-p
+               ":notes"
+               (alist-get 'reason
+                          (car (alist-get 'errors (legu--parse-json (nth 1 result))))))))
+    ;; But a mark of that very file still refuses rather than dropping it.
+    (should (/= 0 (nth 0 (legu-test--legu "mark" "a.txt:1-5"))))
     (should-not (plist-get (legu-sidecar-records root "a.txt") :ok))))
 
 (ert-deftest legu-test-integration-an-opaque-record-outlives-a-range-mark ()

@@ -124,7 +124,8 @@ With a prefix argument THIS-FILE, scope it to the current file."
                                   (make-string (max 2 (- 52 (length heading))) ?\s)
                                   (legu-snapshot-age-string snapshot))
                           'face 'legu-list-count)))
-    (when (eq (plist-get snapshot :state) 'error)
+    (when (or (eq (plist-get snapshot :state) 'error)
+              (plist-get snapshot :errors))
       (legu-list--insert-error snapshot))
     (if (null cov)
         (insert "\n  no snapshot yet — press g\n")
@@ -139,19 +140,30 @@ With a prefix argument THIS-FILE, scope it to the current file."
     (forward-line (1- line))))
 
 (defun legu-list--insert-error (snapshot)
-  "Insert SNAPSHOT's store error banner."
-  (let* ((err (plist-get snapshot :error))
-         (file (plist-get err :file)))
-    (insert (propertize "\nSTORE ERROR — every legu command is failing\n"
-                        'face 'legu-error))
-    (insert (propertize (format "  %s   %s\n"
-                                (if file (file-relative-name file legu-list--root) "store")
-                                (plist-get err :message))
-                        'legu-store-error file))
-    (insert "  RET visits the file (smerge-mode if it has conflict markers), then press g.\n")
-    (when (plist-get snapshot :started)
-      (insert (format "  Numbers below are from the last good snapshot, %s.\n"
-                      (legu-snapshot-age-string snapshot))))))
+  "Insert SNAPSHOT's store error banner.
+A snapshot with no numbers at all reports `:error' and says so.  One
+that merely skipped sidecars names them: the numbers below it are live
+and short by whatever those files hold."
+  (let ((err (plist-get snapshot :error))
+        (errors (plist-get snapshot :errors)))
+    (cond
+     (err
+      (insert (propertize "\nSTORE ERROR — every legu command is failing\n"
+                          'face 'legu-error))
+      (insert (format "  %s\n" (plist-get err :message)))
+      (when (plist-get snapshot :started)
+        (insert (format "  Numbers below are from the last good snapshot, %s.\n"
+                        (legu-snapshot-age-string snapshot)))))
+     (errors
+      (insert (propertize (format "\nSTORE ERROR — %d sidecar%s skipped; the numbers below leave %s out\n"
+                                  (length errors) (if (= 1 (length errors)) "" "s")
+                                  (if (= 1 (length errors)) "it" "them"))
+                          'face 'legu-error))
+      (dolist (e errors)
+        (insert (propertize (format "  %s   %s\n" (plist-get e :file) (plist-get e :reason))
+                            'legu-store-error
+                            (expand-file-name (plist-get e :file) legu-list--root))))
+      (insert "  RET visits the file (smerge-mode if it has conflict markers), then press g.\n")))))
 
 (defun legu-list--insert-coverage (cov)
   "Insert the three numbers of COV, as three rows.  Never one number."
@@ -291,14 +303,16 @@ colon still visits correctly."
   "Visit the row at point, at its range start.
 With OTHER-WINDOW, in another window."
   (interactive)
-  (let ((row (legu-list--at-point)))
-    (unless row (user-error "legu: no row at point"))
-    (let ((file (expand-file-name (plist-get row :path) legu-list--root)))
-      (unless (file-exists-p file)
-        (user-error "legu: %s no longer exists" (plist-get row :path)))
-      (if other-window (find-file-other-window file) (find-file file))
-      (goto-char (point-min))
-      (forward-line (1- (or (plist-get row :start) 1))))))
+  (if-let* ((sidecar (get-text-property (point) 'legu-store-error)))
+      (legu-visit-sidecar sidecar other-window)
+    (let ((row (legu-list--at-point)))
+      (unless row (user-error "legu: no row at point"))
+      (let ((file (expand-file-name (plist-get row :path) legu-list--root)))
+        (unless (file-exists-p file)
+          (user-error "legu: %s no longer exists" (plist-get row :path)))
+        (if other-window (find-file-other-window file) (find-file file))
+        (goto-char (point-min))
+        (forward-line (1- (or (plist-get row :start) 1)))))))
 
 (defun legu-list-visit-other-window ()
   "Visit the row at point in another window."

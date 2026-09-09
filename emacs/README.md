@@ -296,8 +296,11 @@ emacs -Q --batch -L . -L /path/to/evil -L /path/to/goto-chg \
   an existing record leaves both, which is legu's own semantics. This package
   will not issue a `forget` to tidy them.
 - **A corrupt sidecar for the file you are in kills that file's display** —
-  tier 0 and the CLI fail on the same file. Every other file keeps painting,
-  and the queue buffer names the offender.
+  tier 0 and the CLI both fail on the same file, and its lines leave the counts
+  rather than being called unread. Every other file keeps painting, every
+  number stays live, and the queue buffer names the offender from the `errors`
+  the CLI reports; `RET` on that line opens it, in `smerge-mode` when it is
+  unmerged.
 - Paths containing `:` are not `next-error`-navigable in the queue; `RET`
   still works, because text properties are what this package reads.
 - No Tramp: `legu-mode` refuses on remote files.

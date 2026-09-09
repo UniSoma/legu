@@ -517,10 +517,6 @@ was recorded; asking for the record under point would miss it."
 (defvar legu--failures nil
   "Failed mutations, newest first.  Each is a plist.")
 
-(defconst legu--broken-store-rx
-  "legu: cannot read \\(.*?\\): \\(.*\\)$"
-  "Stderr shape of a sidecar the CLI refuses to load.")
-
 (defun legu--program ()
   "Absolute path of the legu executable, or nil."
   (or (and (file-name-absolute-p legu-executable)
@@ -530,8 +526,8 @@ was recorded; asking for the record under point would miss it."
 
 (defun legu--run (root args callback)
   "Run legu with ARGS in ROOT, calling CALLBACK when it exits.
-CALLBACK receives (STATUS STDOUT STDERR), STATUS one of `ok', `failed'
-or `broken-store'.  Nothing in this package ever blocks on it."
+CALLBACK receives (STATUS STDOUT STDERR), STATUS either `ok' or
+`failed'.  Nothing in this package ever blocks on it."
   (let ((program (legu--program)))
     (if (not program)
         ;; Signalling here would strand the write queue: the job is already
@@ -557,10 +553,7 @@ or `broken-store'.  Nothing in this package ever blocks on it."
                       (ok (and (eq (process-status proc) 'exit) (= 0 code)))
                       (stdout (with-current-buffer out (buffer-string)))
                       (stderr (with-current-buffer err (buffer-string)))
-                      (status (cond (ok 'ok)
-                                    ((string-match legu--broken-store-rx stderr)
-                                     'broken-store)
-                                    (t 'failed))))
+                      (status (if ok 'ok 'failed)))
                  (funcall callback status stdout stderr))
              (when (process-live-p errp) (delete-process errp))
              (when (buffer-live-p out) (kill-buffer out))
@@ -626,9 +619,7 @@ starts while ROOT has writes in flight; those reschedule it on drain."
   "Launch the two processes that make up a snapshot of ROOT."
   (remhash root legu--refresh-timers)
   (unless (or (gethash root legu--write-active)
-              (gethash root legu--write-queues)
-              (and (eq (plist-get (legu-snapshot root) :state) 'error)
-                   (legu--store-still-broken-p root)))
+              (gethash root legu--write-queues))
     (let* ((gen (1+ (or (gethash root legu--generations) 0)))
            (started (current-time))
            (previous (plist-get (legu-snapshot root) :state))
@@ -659,28 +650,26 @@ starts while ROOT has writes in flight; those reschedule it on drain."
            (when (= 0 (plist-get pending :left))
              (legu--snapshot-finish root pending))))))))
 
-(defun legu--store-still-broken-p (root)
-  "Whether ROOT's recorded store error still stands, by mtime."
-  (let* ((s (legu-snapshot root))
-         (err (plist-get s :error))
-         (file (plist-get err :file))
-         (was (plist-get s :error-mtime)))
-    (and file was (file-exists-p file)
-         (equal was (file-attribute-modification-time (file-attributes file))))))
-
-(defun legu--snapshot-error (root kind message &optional file)
-  "Put ROOT into the error state described by KIND, MESSAGE and FILE."
+(defun legu--snapshot-error (root kind message)
+  "Put ROOT into the error state described by KIND and MESSAGE.
+Reserved for a snapshot that has no numbers at all.  A store the CLI
+merely skipped part of lands in `:errors' instead, numbers and all."
   (legu--snapshot-put root :state 'error)
-  (legu--snapshot-put root :error (list :kind kind :file file :message message))
-  (legu--snapshot-put
-   root :error-mtime
-   (and file (file-exists-p file)
-        (file-attribute-modification-time (file-attributes file))))
-  (legu--warn-once (list kind file message)
-                   (if (eq kind 'broken-store)
-                       (format "legu: store error in %s (%s); every legu command is failing"
-                               (if file (file-name-nondirectory file) "the store") message)
-                     (format "legu: %s" message))))
+  (legu--snapshot-put root :error (list :kind kind :message message))
+  ;; This snapshot has no numbers at all; a partial one's sidecar list would
+  ;; read as the whole story.
+  (legu--snapshot-put root :errors nil)
+  (legu--warn-once (list kind message) (format "legu: %s" message)))
+
+(defun legu--store-errors (&rest data)
+  "The sidecars DATA say the CLI could not read, as plists, one per file."
+  (let (out)
+    (dolist (d data)
+      (dolist (e (alist-get 'errors d))
+        (let ((file (alist-get 'file e)))
+          (unless (seq-find (lambda (o) (equal file (plist-get o :file))) out)
+            (push (list :file file :reason (alist-get 'reason e)) out)))))
+    (nreverse out)))
 
 (defun legu--snapshot-finish (root pending)
   "Fold PENDING's two process results into ROOT's snapshot."
@@ -688,11 +677,6 @@ starts while ROOT has writes in flight; those reschedule it on drain."
          (stale (plist-get pending :stale))
          (started (plist-get pending :started)))
     (cond
-     ((or (eq (nth 0 status) 'broken-store) (eq (nth 0 stale) 'broken-store))
-      (let* ((err (if (eq (nth 0 status) 'broken-store) (nth 2 status) (nth 2 stale)))
-             (file (and (string-match legu--broken-store-rx err) (match-string 1 err)))
-             (why (and (string-match legu--broken-store-rx err) (match-string 2 err))))
-        (legu--snapshot-error root 'broken-store (or why "unreadable") file)))
      ((or (eq (nth 0 status) 'failed) (eq (nth 0 stale) 'failed))
       (legu--snapshot-error
        root 'cli-failed
@@ -712,7 +696,9 @@ starts while ROOT has writes in flight; those reschedule it on drain."
     (when (featurep 'legu-dired) (legu-dired-refresh-buffers root))))
 
 (defun legu--snapshot-store (root sdata tdata started)
-  "Build ROOT's snapshot from parsed SDATA and TDATA, launched at STARTED."
+  "Build ROOT's snapshot from parsed SDATA and TDATA, launched at STARTED.
+Sidecars the CLI could not read are carried in `:errors'; every number
+here is live, and short by whatever those files held."
   (let ((rows (make-hash-table :test #'equal))
         (eligible (make-hash-table :test #'equal))
         (stale (make-hash-table :test #'equal))
@@ -754,8 +740,13 @@ starts while ROOT has writes in flight; those reschedule it on drain."
                    :coverage (list :files files :lines lines :reviewed reviewed
                                    :stale nstale :never (- lines reviewed nstale))
                    :queue queue
-                   :state 'fresh :error nil :error-mtime nil)
-             legu--snapshots)))
+                   :state 'fresh :error nil
+                   :errors (legu--store-errors sdata tdata))
+             legu--snapshots)
+    (dolist (e (legu--store-errors sdata tdata))
+      (legu--warn-once (list 'store-error (plist-get e :file) (plist-get e :reason))
+                       (format "legu: skipped %s (%s); its lines are missing from every number"
+                               (plist-get e :file) (plist-get e :reason))))))
 
 (defun legu--parent-key (path)
   "Reproduce the CLI's (str (fs/parent (fs/path PATH))) sort key.
@@ -1101,7 +1092,9 @@ marking one would be rejected."
           (format " %d%%" (/ (* 100 (plist-get cov :reviewed)) lines)))
         (when legu--tier0-unresolved "?")
         (when (> legu--stale-count 0)
-          (propertize (format "▪%d" legu--stale-count) 'face 'warning))))))))
+          (propertize (format "▪%d" legu--stale-count) 'face 'warning))
+        (when (plist-get snapshot :errors)
+          (propertize "!" 'face 'legu-error))))))))
 
 (defvar legu-lighter '(:eval (legu--lighter)))
 ;; Without this the lighter renders nothing at all, silently.
@@ -1122,9 +1115,8 @@ marking one would be rejected."
                 (or legu--relpath (buffer-name))))
   (let ((snapshot (legu-snapshot legu--root)))
     (when (eq (plist-get snapshot :state) 'error)
-      (user-error "legu: %s (%s); fix the store, then press %s"
+      (user-error "legu: %s; fix it, then press %s"
                   (plist-get (plist-get snapshot :error) :message)
-                  (or (plist-get (plist-get snapshot :error) :file) "store")
                   (key-description (kbd "C-c r g"))))))
 
 (defun legu--ensure-saved ()
@@ -1500,7 +1492,7 @@ With a prefix argument REFRESH, refresh the snapshot first."
       (when root
         (legu--snapshot-put root :state 'fresh)
         (legu--snapshot-put root :error nil)
-        (legu--snapshot-put root :error-mtime nil)
+        (legu--snapshot-put root :errors nil)
         (legu-refresh-snapshot root))))
   (legu--repaint)
   (when force (message "legu: refreshing…")))
@@ -1516,19 +1508,23 @@ With a prefix argument REFRESH, refresh the snapshot first."
     (setq legu--hidden (not legu--hidden))
     (legu--repaint)))
 
+(defun legu-visit-sidecar (file &optional other-window)
+  "Open the unreadable sidecar FILE, in smerge-mode if it is unmerged."
+  (if other-window (find-file-other-window file) (find-file file))
+  (when (save-excursion
+          (goto-char (point-min))
+          (re-search-forward "^<<<<<<< " nil t))
+    (require 'smerge-mode)
+    (smerge-mode 1)))
+
 (defun legu-visit-broken-store ()
-  "Open the sidecar that is breaking every legu command."
+  "Open the first sidecar legu could not read."
   (interactive)
   (let* ((root (or legu--root (legu-root)))
-         (file (plist-get (plist-get (legu-snapshot root) :error) :file)))
+         (file (plist-get (car (plist-get (legu-snapshot root) :errors)) :file)))
     (if (not file)
         (message "legu: no store error recorded")
-      (find-file file)
-      (when (save-excursion
-              (goto-char (point-min))
-              (re-search-forward "^<<<<<<< " nil t))
-        (require 'smerge-mode)
-        (smerge-mode 1)))))
+      (legu-visit-sidecar (expand-file-name file root)))))
 
 
 ;;;; The failures buffer
