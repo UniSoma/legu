@@ -441,6 +441,66 @@
       (search-forward "2 stale")
       (should (eq 'legu-stale (get-text-property (1- (point)) 'face))))))
 
+(defun legu-test--column-of (needle)
+  "The screen column NEEDLE starts at, counting an elision as one glyph."
+  (goto-char (point-min))
+  (search-forward needle)
+  (legu-list--display-width
+   (buffer-substring (line-beginning-position) (match-beginning 0))))
+
+(ert-deftest legu-test-list-elides-the-middle-of-a-long-path ()
+  (let* ((path ".tickets/archive/lgu-01m237878ry2--give-legu-a-human-output.md")
+         (shown (legu-list--elide path 30))
+         (hidden (text-property-not-all 0 (length shown) 'display nil shown)))
+    (should (<= (legu-list--display-width shown) 30))
+    ;; The whole path is still there to be copied, visited and parsed.
+    (should (equal path (substring-no-properties shown)))
+    ;; Both ends survive: the directory it sits in, and the end of the name
+    ;; that tells it apart from its neighbours.
+    (should hidden)
+    (should (> hidden 0))
+    (should (equal "…" (substring-no-properties
+                        (get-text-property hidden 'display shown))))
+    (should-not (get-text-property (1- (length shown)) 'display shown))))
+
+(ert-deftest legu-test-list-leaves-a-path-that-fits-alone ()
+  (let ((shown (legu-list--elide "src/legu.el" 30)))
+    (should (equal "src/legu.el" (substring-no-properties shown)))
+    (should (= 11 (legu-list--display-width shown)))
+    (should-not (text-property-not-all 0 (length shown) 'display nil shown))))
+
+(ert-deftest legu-test-list-columns-line-up-past-a-long-path ()
+  ;; A path too long for the anchor column must not push the counts off the
+  ;; row it is on, and must still parse as a compilation message.
+  (let ((legu--snapshots (make-hash-table :test #'equal))
+        (long (concat ".tickets/archive/"
+                      "lgu-01m237878ry2--give-legu-next-and-legu-coverage-"
+                      "a-human-output.md")))
+    (puthash "/tmp/x/"
+             (list :state 'fresh :started (current-time)
+                   :coverage (list :lines 100 :reviewed 10 :stale 1 :never 89 :files 2)
+                   :queue (list (list :path "a.el" :unreviewed 13 :stale 0
+                                      :ranges '((1 . 13)))
+                                (list :path long :unreviewed 44 :stale 0
+                                      :ranges '((1 . 44)))))
+             legu--snapshots)
+    (with-temp-buffer
+      (legu-list-mode)
+      (setq legu-list--root "/tmp/x/")
+      (legu-list--render)
+      (should (= (legu-test--column-of "13 unread")
+                 (legu-test--column-of "44 unread")))
+      ;; next-error still has the whole anchor to work from.
+      (should (string-match-p (regexp-quote (concat long ":1:44:"))
+                              (substring-no-properties (buffer-string))))
+      (goto-char (point-min))
+      (search-forward long)
+      (should (text-property-not-all (line-beginning-position) (point)
+                                     'display nil))
+      (should (equal long (get-text-property (1- (point)) 'legu-path)))
+      (font-lock-ensure)
+      (should (get-text-property (point) 'compilation-message)))))
+
 (ert-deftest legu-test-list-says-when-there-is-nothing-to-read ()
   (let ((legu--snapshots (make-hash-table :test #'equal)))
     (puthash "/tmp/x/"

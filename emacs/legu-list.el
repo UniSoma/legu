@@ -259,16 +259,60 @@ The bars share one scale, so the three rows read as one stacked bar."
                       'legu-list-count)))
             "\n")))
 
+(defun legu-list--display-width (text)
+  "How wide TEXT is on screen, counting an elided run as its ellipsis."
+  (let ((i 0) (n (length text)) (width 0))
+    (while (< i n)
+      (let ((to (or (next-single-property-change i 'display text) n))
+            (shown (get-text-property i 'display text)))
+        (setq width (+ width (string-width (if (stringp shown)
+                                               shown
+                                             (substring text i to))))
+              i to)))
+    width))
+
+(defun legu-list--suffix (text width)
+  "The longest tail of TEXT no wider than WIDTH."
+  (let ((i (length text)))
+    (while (and (> i 0) (<= (string-width (substring text (1- i))) width))
+      (setq i (1- i)))
+    (substring text i)))
+
+(defun legu-list--elide (path budget)
+  "PATH, painted, with its middle hidden behind an ellipsis to fit BUDGET.
+Only the display shrinks: the row still carries the whole path, because
+that is what `next-error' parses and what tells two ticket slugs apart.
+The tail gets the larger share, since files that share a directory are
+told apart by their names."
+  (let ((text (legu-list--face path 'legu-list-path)))
+    (if (or (<= (string-width path) budget) (< budget 4))
+        text
+      (let* ((room (1- budget))
+             (head (truncate-string-to-width path (/ room 3)))
+             (tail (legu-list--suffix path (- room (string-width head))))
+             (from (length head))
+             (to (- (length path) (length tail))))
+        (when (< from to)
+          (put-text-property from to
+                             'display (legu-list--face "…" 'legu-list-path)
+                             text))
+        text))))
+
 (defun legu-list--row (path start end kind text)
   "Insert one navigable row.
 The `path:start:end:' prefix is what `next-error' matches on; the text
 properties are what this package itself reads, so a path containing a
 colon still visits correctly."
-  (let ((from (point))
-        (anchor (format "%s:%s:%s:" path (or start 1) (or end start 1))))
-    (insert (legu-list--face path 'legu-list-path)
-            (legu-list--face (substring anchor (length path)) 'legu-list-anchor)
-            (make-string (max 2 (- legu-list--anchor-width (length anchor))) ?\s)
+  (let* ((from (point))
+         (lines (format ":%s:%s:" (or start 1) (or end start 1)))
+         (shown (legu-list--elide
+                 path (- legu-list--anchor-width 2 (length lines)))))
+    (insert shown
+            (legu-list--face lines 'legu-list-anchor)
+            (make-string (max 2 (- legu-list--anchor-width
+                                   (+ (legu-list--display-width shown)
+                                      (length lines))))
+                         ?\s)
             text "\n")
     (put-text-property from (point) 'legu-path path)
     (put-text-property from (point) 'legu-start (or start 1))
@@ -277,10 +321,16 @@ colon still visits correctly."
 
 (defun legu-list--anchor-width (anchors)
   "The column the row text starts at, given every anchor of a section.
-Wide enough that the columns line up, never so wide that a single deep
-path pushes them off the screen."
-  (let ((longest (apply #'max 0 (mapcar #'length anchors))))
-    (min 72 (max 36 (+ longest 3)))))
+Wide enough that the columns line up, never so wide that the counts to
+the right of them fall off the window.  Anchors past it are elided."
+  (let ((longest (apply #'max 0 (mapcar #'string-width anchors)))
+        ;; Undisplayed buffers render too, and the first render of all
+        ;; happens before the queue has a window: fall back to the cap
+        ;; rather than to whatever window happens to be selected.
+        (room (if-let* ((window (get-buffer-window)))
+                  (- (window-body-width window) 34)
+                72)))
+    (max 36 (min 72 room (+ longest 3)))))
 
 (defun legu-list--count (n unit &optional face)
   "N and UNIT as a count cell.  A zero is dimmed; N > 0 wears FACE."
