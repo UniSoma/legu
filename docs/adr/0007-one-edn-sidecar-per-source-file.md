@@ -1,5 +1,9 @@
 # Review state lives in one committed EDN sidecar per source file
 
+Superseded by [ADR-0015](0015-jsonl-sidecars-one-record-per-line.md): the
+store is JSON Lines. The one-sidecar-per-file shape and the reasons for it
+stand.
+
 The store is `.review/` at the repo root, mirroring the source tree, one
 `<path>.edn` per source file, committed alongside the code. Source files are
 never modified. A single index file would be simpler but two reviewers would

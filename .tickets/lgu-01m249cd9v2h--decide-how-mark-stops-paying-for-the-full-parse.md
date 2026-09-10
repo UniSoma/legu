@@ -6,7 +6,7 @@ type: task
 priority: 2
 mode: hitl
 created: '2026-09-09T23:52:20.536743583Z'
-updated: '2026-09-10T10:52:06.176449298Z'
+updated: '2026-09-10T14:06:33.026813719Z'
 acceptance:
 - title: A note on this ticket records the decision, the measurement it rests on, and the ADR it touches if any
   done: false
@@ -22,6 +22,8 @@ links:
 - lgu-01m249cd2vt1
 - lgu-01m249cd6dgq
 - lgu-01m249cddd06
+- lgu-01m25t7y4zzf
+- lgu-01m25t8643d6
 ---
 
 ## Description
@@ -65,3 +67,19 @@ Same value from all three. edamame is about 1.5x slower here, so it is not
 the faster reader this ticket weighs. The 172 us per 20-record sidecar
 matches the 2.0 s parse of 10,000 sidecars in mark's profile. A faster
 reader would have to be written for the ADR-0014 layout itself.
+
+**2026-09-10T14:06:33.026813719Z**
+
+The store format is moving before this decision is taken. ADR-0015 changes
+sidecars to JSON Lines, one record per line, for the count of changed lines
+in pull requests, and lgu-01m25t7y4zzf lands it. That is the first of the
+three options above by another route: the reader that replaces
+`edn/read-string` is cheshire, which already ships, rather than a reader
+written for the ADR-0014 layout. A scratch benchmark on 10,000 sidecars of
+20 records, warm, in one bb process, read and parsed the tree in 0.75 s as
+JSONL against 2.37 s as EDN, about 3.2x, at 61.1 MB against 62.8 MB raw.
+
+Sequence: lgu-01m25t7y4zzf, then lgu-01m249cd6dgq re-measured on the new
+format, then this decision with both numbers. If the two together bring mark
+under 500 ms on one machine's core count, the cache outside the store is not
+needed and the narrower contract is not either.

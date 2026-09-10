@@ -1,5 +1,8 @@
 # Sidecars are written in a fixed layout, one self-contained record at a time
 
+Layout amended by [ADR-0015](0015-jsonl-sidecars-one-record-per-line.md):
+a record is one JSON line. Sorting, full hashes and the merge argument stand.
+
 A sidecar used to be pretty-printed: width-dependent wrapping, a redundant
 `:path`, and opaque records carrying `nil` bounds and a duplicate hash. A mark
 could re-wrap lines it did not touch, so a diff of the store was not a diff of

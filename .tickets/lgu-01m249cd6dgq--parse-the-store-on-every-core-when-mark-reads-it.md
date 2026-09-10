@@ -6,7 +6,7 @@ type: task
 priority: 2
 mode: afk
 created: '2026-09-09T23:52:20.426609585Z'
-updated: '2026-09-09T23:52:20.762003493Z'
+updated: '2026-09-10T14:06:32.887993809Z'
 acceptance:
 - title: mark at 10,000 files and 20 records completes under 1 s on the experiment's fixture, three fresh-process trials recorded on the ticket, with the core count
   done: false
@@ -16,6 +16,7 @@ acceptance:
   done: false
 deps:
 - lgu-01m249ccvy6a
+- lgu-01m25t7y4zzf
 links:
 - lgu-01m21qtzrcfq
 - lgu-01m249ccrj5h
@@ -24,6 +25,8 @@ links:
 - lgu-01m249cd2vt1
 - lgu-01m249cd9v2h
 - lgu-01m249cddd06
+- lgu-01m25t7y4zzf
+- lgu-01m25t8643d6
 ---
 
 ## Description
