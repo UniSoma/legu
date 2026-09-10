@@ -734,7 +734,7 @@
 
 (defn skipped-paths
   "Paths whose sidecar legu could not read. Their review state is unknown, so
-   they are left out of the counts rather than reported as never read — the
+   they are left out of the counts rather than reported as unreviewed — the
    `errors` key is what says they are missing from the numbers."
   []
   (run! read-state (stored-paths))
@@ -938,9 +938,9 @@
 
 (defn num-column
   "How wide a column of counts wants to be: its widest number, and never
-   narrower than the longest heading one of these columns carries."
-  [ns]
-  (max (count "UNREAD") (count (str (apply max 0 ns)))))
+   narrower than its HEADING."
+  [heading ns]
+  (max (count heading) (count (str (apply max 0 ns)))))
 
 (defn cell
   "N in a column WIDTH wide, painted CODE unless it is a zero, which is dim
@@ -1273,27 +1273,27 @@
 (defn render-files [files hidden]
   (println)
   (println (str (paint :bold "FILES") "  "
-                (paint :dim (str (count (remove :read-in-full files)) " with gaps · "
-                                 (+ hidden (count (filter :read-in-full files)))
-                                 " read in full"
+                (paint :dim (str (count (remove :fully-reviewed files)) " with gaps · "
+                                 (+ hidden (count (filter :fully-reviewed files)))
+                                 " fully reviewed"
                                  (when (pos? hidden) " (hidden)")))))
   (when (seq files)
     (let [path-width (path-column (map :path files))
-          digits (num-column (map :total files))
-          num (fn [n] (format (str "%" digits "d") n))]
+          [rw sw uw tw] (map #(num-column % (map :total files))
+                             ["REVIEWED" "STALE" "UNREVIEWED" "TOTAL"])]
       (println (paint :dim (str "  " (format (str "%-" path-width "s") "PATH")
-                                "  " (format (str "%" digits "s") "READ")
-                                "  " (format (str "%" digits "s") "STALE")
-                                "  " (format (str "%" digits "s") "UNREAD")
-                                "  " (format (str "%" digits "s") "TOTAL")
-                                "  READ RANGES")))
+                                "  " (format (str "%" rw "s") "REVIEWED")
+                                "  " (format (str "%" sw "s") "STALE")
+                                "  " (format (str "%" uw "s") "UNREVIEWED")
+                                "  " (format (str "%" tw "s") "TOTAL")
+                                "  REVIEWED RANGES")))
       (doseq [f files]
         (println (str "  " (format (str "%-" path-width "s") (shorten-path (:path f) path-width))
-                      "  " (cell (:reviewed f) digits :green)
-                      "  " (cell (:stale f) digits :yellow)
-                      "  " (cell (:unreviewed f) digits nil)
-                      "  " (num (:total f))
-                      "  " (cond (:read-in-full f) (paint :dim "read in full")
+                      "  " (cell (:reviewed f) rw :green)
+                      "  " (cell (:stale f) sw :yellow)
+                      "  " (cell (:unreviewed f) uw nil)
+                      "  " (format (str "%" tw "d") (:total f))
+                      "  " (cond (:fully-reviewed f) (paint :dim "fully reviewed")
                                  (empty? (:reviewed-ranges f)) (paint :dim "none")
                                  :else (fmt-ranges (:reviewed-ranges f)))))))))
 
@@ -1317,9 +1317,9 @@
         all-files (->> (eligible-files)
                        (filter #(under? (:path %) prefix))
                        (map #(file-coverage by-path %))
-                       (map #(assoc % :read-in-full (= (:reviewed %) (:total %))))
+                       (map #(assoc % :fully-reviewed (= (:reviewed %) (:total %))))
                        (sort-by :path))
-        files (if (:gaps opts) (remove :read-in-full all-files) all-files)
+        files (if (:gaps opts) (remove :fully-reviewed all-files) all-files)
         hidden (- (count all-files) (count files))
         coverage {:files (count all-files)
                   :lines (reduce + 0 (map :total all-files))
@@ -1331,7 +1331,7 @@
                      (filter #(under? (:path %) prefix))
                      (sort-by (juxt :path #(or (:start %) 0))))
         data {:coverage coverage
-              :files (mapv #(-> (dissoc % :reviewed-ranges :read-in-full)
+              :files (mapv #(-> (dissoc % :reviewed-ranges :fully-reviewed)
                                 (assoc :ranges (fmt-ranges (:reviewed-ranges %))))
                            files)
               :tickets (mapv #(-> (select-keys % [:path :start :end :ticket])
@@ -1400,16 +1400,17 @@
                                    "co-change with what you have reviewed"
                                    "directory order")))))
   (let [path-width (path-column (map :path files))
-        digits (num-column (map #(+ (:unreviewed %) (:stale %)) files))]
+        [uw sw] (map #(num-column % (map (fn [f] (+ (:unreviewed f) (:stale f))) files))
+                     ["UNREVIEWED" "STALE"])]
     (println (paint :dim (str "  " (format (str "%-" path-width "s") "PATH")
-                              "  " (format (str "%" digits "s") "UNREAD")
-                              "  " (format (str "%" digits "s") "STALE")
+                              "  " (format (str "%" uw "s") "UNREVIEWED")
+                              "  " (format (str "%" sw "s") "STALE")
                               "  TO READ")))
     (doseq [f files]
       (println (str "  " (format (str "%-" path-width "s")
                                  (shorten-path (:path f) path-width))
-                    "  " (cell (:unreviewed f) digits nil)
-                    "  " (cell (:stale f) digits :yellow)
+                    "  " (cell (:unreviewed f) uw nil)
+                    "  " (cell (:stale f) sw :yellow)
                     "  " (if (= (range-lines (:todo f)) (:total f))
                            (paint :dim "whole file")
                            (fmt-ranges (:todo f))))))))
@@ -1480,7 +1481,7 @@
    ;; An enum, not a set: it keeps the order it is written in, so help and the
    ;; error name dir first, as the default and as the order a reader meets.
    :order {:enum ["dir" "cochange"] :desc "`next` order (default: dir)"}
-   :gaps {:coerce :boolean :desc "hide files read in full from `status`"}})
+   :gaps {:coerce :boolean :desc "hide fully reviewed files from `status`"}})
 
 (def commands
   "One entry per command. :doc is both its line in `legu --help` and the

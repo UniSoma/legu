@@ -153,7 +153,7 @@ HEAD, so an uncommitted edit shows up as stale immediately.
 
 `legu next` lists the files with something left to read: a heading saying how
 many of them are on screen, how many have gaps and which order they are in,
-then one row per file with its unread and stale line counts and the lines left
+then one row per file with its unreviewed and stale line counts and the lines left
 to read. The two orderings answer different questions, and the default is
 `dir`:
 
@@ -307,7 +307,7 @@ skipped on stderr and adds an `errors` key to its `--json`:
 
 Paths there are relative to the repo root, one entry per file, and the key is
 absent when there is nothing to report. A file whose sidecar legu cannot read
-leaves the counts entirely: calling it never read would send `next` back to a
+leaves the counts entirely: calling it unreviewed would send `next` back to a
 file you have already read. The one command that still refuses is a write to
 the unreadable sidecar itself: writing it would drop the state it still holds.
 

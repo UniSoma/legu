@@ -118,7 +118,7 @@ fringe already belongs to `diff-hl'."
   :group 'legu)
 
 (defface legu-list-never '((t :inherit shadow))
-  "Face for the never-read row of the coverage block."
+  "Face for the unreviewed row of the coverage block."
   :group 'legu)
 
 (defface legu-error '((t :inherit error))

@@ -323,7 +323,7 @@ that could tell the two apart checks that legu's queue bindings beat
   will not issue a `forget` to tidy them.
 - **A corrupt sidecar for the file you are in kills that file's display** —
   tier 0 and the CLI both fail on the same file, and its lines leave the counts
-  rather than being called unread. Every other file keeps painting, every
+  rather than being called unreviewed. Every other file keeps painting, every
   number stays live, and the queue buffer names the offender from the `errors`
   the CLI reports; `RET` on that line opens it, in `smerge-mode` when it is
   unmerged.

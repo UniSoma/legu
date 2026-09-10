@@ -25,10 +25,10 @@
      (propertize "legu" 'face 'transient-heading)
      (if (null cov)
          "  no snapshot yet"
-       (format " — %.0f%% read · %.1f%% stale · %.0f%% never read"
+       (format " — %.0f%% unreviewed · %.0f%% reviewed · %.1f%% stale"
+               (* 100.0 (/ (float (plist-get cov :never)) lines))
                (* 100.0 (/ (float (plist-get cov :reviewed)) lines))
-               (* 100.0 (/ (float (plist-get cov :stale)) lines))
-               (* 100.0 (/ (float (plist-get cov :never)) lines))))
+               (* 100.0 (/ (float (plist-get cov :stale)) lines))))
      "   "
      (propertize (if snapshot (legu-snapshot-age-string snapshot) "") 'face 'shadow))))
 

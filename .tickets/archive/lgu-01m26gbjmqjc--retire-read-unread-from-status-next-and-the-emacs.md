@@ -1,22 +1,26 @@
 ---
 id: lgu-01m26gbjmqjc
 title: Retire read / unread from status, next and the Emacs views
-status: open
+status: closed
 type: chore
 priority: 3
 mode: afk
 created: '2026-09-10T20:32:42.134969838Z'
-updated: '2026-09-10T20:32:49.263368307Z'
+updated: '2026-09-10T21:04:52.008986665Z'
+closed: '2026-09-10T21:04:52.008986665Z'
 parent: lgu-01m238vjgnh6
 acceptance:
 - title: status and next headers and cells use the glossary's words, or an ADR records why a table keeps a shorter one
-  done: false
+  done: true
 - title: The Emacs coverage block and echo lines match the CLI's coverage rows
-  done: false
+  done: true
 - title: The CLI suite and the ERT suite pin the wording that wins
-  done: false
+  done: true
 links:
 - lgu-01m23d9faenk
+- lgu-01m26j64rmqk
+external_refs:
+- git:a0a55c2203a8ec712c3d2a56f9cf18535c5baae4
 ---
 
 ## Description
@@ -28,3 +32,9 @@ lgu-01m23d9faenk moved `coverage` onto CONTEXT.md's words: its rows now read unr
 - the Emacs coverage block and echo lines: legu-list.el ("never read" row), legu.el (the coverage message), legu-transient.el ("% read · % stale · % never read")
 
 The same `coverage` block that `status` opens with now says unreviewed / reviewed, so the Emacs list's coverage block, which mirrors it, now disagrees with the CLI. No JSON key is involved: status and next already emit `unreviewed`.
+
+## Notes
+
+**2026-09-10T21:04:52.008986665Z**
+
+status and next now head their columns REVIEWED / UNREVIEWED / REVIEWED RANGES and say 'fully reviewed'; the Emacs coverage block, coverage echo line and menu heading say unreviewed / reviewed / stale in the CLI's order, and the queue filter symbol is now 'unreviewed'. No JSON key moved, version stays 0.5.0. One CLI case and two ERT cases pin the wording. Remaining 'read'-as-state strings in Emacs prompts and help-echo are filed as lgu-01m26j64rmqk.

@@ -374,9 +374,46 @@ parse is not skipped, since the lines a merge conflict wraps are records."
         (should (string-match-p "\\.review/b\\.txt\\.jsonl" text))
         (should (string-match-p "not a review record" text))
         ;; The numbers next to it are this snapshot's, not the last good one's.
-        (should (string-match-p "read +5" text))
+        (should (string-match-p "reviewed +5" text))
         (should-not (string-match-p "last good snapshot" text))
         (should-not (string-match-p "every legu command is failing" text))))))
+
+(ert-deftest legu-test-coverage-block-and-echo-say-the-clis-three-states ()
+  ;; lgu-01m26gbjmqjc: the block and the echo line said "read" and "never
+  ;; read" after the CLI's coverage rows had moved to CONTEXT.md's words.
+  (let ((legu--snapshots (make-hash-table :test #'equal)))
+    (puthash "/tmp/x/"
+             (list :state 'fresh :started (current-time)
+                   :coverage (list :lines 100 :reviewed 60 :stale 2 :never 38 :files 2))
+             legu--snapshots)
+    (with-temp-buffer
+      (legu-list-mode)
+      (setq legu-list--root "/tmp/x/")
+      (legu-list--render)
+      (let ((text (substring-no-properties (buffer-string))))
+        (should (string-match-p "^  unreviewed +38 " text))
+        (should (string-match-p "^  reviewed +60 " text))
+        (should (string-match-p "^  stale +2 " text))
+        (should-not (string-match-p "never\\|^  read " text))))
+    (with-temp-buffer
+      (setq-local legu--root "/tmp/x/")
+      (let (said)
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args) (setq said (apply #'format fmt args)))))
+          (legu-coverage nil))
+        (should (string-match-p "38\\.0% unreviewed · 60\\.0% reviewed · 2\\.0% stale" said))))))
+
+(ert-deftest legu-test-menu-heading-says-the-clis-three-states ()
+  (skip-unless (require 'legu-transient nil t))
+  (let ((legu--snapshots (make-hash-table :test #'equal)))
+    (puthash "/tmp/x/"
+             (list :state 'fresh :started (current-time)
+                   :coverage (list :lines 100 :reviewed 60 :stale 2 :never 38 :files 2))
+             legu--snapshots)
+    (with-temp-buffer
+      (setq-local legu--root "/tmp/x/")
+      (should (string-match-p "— 38% unreviewed · 60% reviewed · 2\\.0% stale"
+                              (substring-no-properties (legu-transient--heading)))))))
 
 (ert-deftest legu-test-list-banner-prefers-a-snapshot-with-no-numbers ()
   ;; A snapshot that failed outright must not show the sidecar list a partial
@@ -438,8 +475,8 @@ parse is not skipped, since the lines a merge conflict wraps are records."
       (legu-list--render)
       (should (string-match-p "NEXT  2 of 5 files" (buffer-string)))
       ;; Both count columns start at the same screen column.
-      (should (= (progn (goto-char (point-min)) (search-forward "13 unread") (current-column))
-                 (progn (goto-char (point-min)) (search-forward " 4 unread") (current-column))))
+      (should (= (progn (goto-char (point-min)) (search-forward "13 unreviewed") (current-column))
+                 (progn (goto-char (point-min)) (search-forward " 4 unreviewed") (current-column))))
       (goto-char (point-min))
       (search-forward "0 stale")
       (should (eq 'legu-list-count (get-text-property (1- (point)) 'face)))
@@ -493,8 +530,8 @@ parse is not skipped, since the lines a merge conflict wraps are records."
       (legu-list-mode)
       (setq legu-list--root "/tmp/x/")
       (legu-list--render)
-      (should (= (legu-test--column-of "13 unread")
-                 (legu-test--column-of "44 unread")))
+      (should (= (legu-test--column-of "13 unreviewed")
+                 (legu-test--column-of "44 unreviewed")))
       ;; next-error still has the whole anchor to work from.
       (should (string-match-p (regexp-quote (concat long ":1:44:"))
                               (substring-no-properties (buffer-string))))

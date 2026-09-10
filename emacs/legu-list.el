@@ -28,7 +28,7 @@
 
 (defcustom legu-list-filter 'all
   "Which rows the queue buffer shows by default."
-  :type '(choice (const all) (const stale) (const unread))
+  :type '(choice (const all) (const stale) (const unreviewed))
   :group 'legu)
 
 (defvar-keymap legu-list-mode-map
@@ -194,10 +194,10 @@ Silence would look like a broken render."
             (legu-list--face
              (pcase legu-list--filter
                ('stale "no stale regions")
-               ('unread "no unread files")
+               ('unreviewed "no unreviewed files")
                (_ (if legu-list--scope
-                      "this file is fully read"
-                    "nothing to read — every eligible line is read")))
+                      "this file is fully reviewed"
+                    "nothing to read — every eligible line is reviewed")))
              'legu-list-count)
             "\n")))
 
@@ -238,8 +238,8 @@ The bars share one scale, so the three rows read as one stacked bar."
         (width (max 8 (min 40 (- (window-body-width (get-buffer-window)) 34)))))
     (insert "\n")
     (pcase-dolist (`(,label ,count ,face)
-                   (list (list "never read" (plist-get cov :never) 'legu-list-never)
-                         (list "read" (plist-get cov :reviewed) 'legu-reviewed)
+                   (list (list "unreviewed" (plist-get cov :never) 'legu-list-never)
+                         (list "reviewed" (plist-get cov :reviewed) 'legu-reviewed)
                          (list "stale" (plist-get cov :stale) 'legu-stale)))
       (let ((fraction (/ (float count) lines)))
         (insert "  " (legu-list--face (format "%-12s" label) face)
@@ -255,7 +255,7 @@ The bars share one scale, so the three rows read as one stacked bar."
              (concat (legu-list--face "f" 'legu-list-key) " "
                      (legu-list--face
                       (pcase legu-list--filter
-                        ('stale "stale only") ('unread "unread only") (_ "all"))
+                        ('stale "stale only") ('unreviewed "unreviewed only") (_ "all"))
                       'legu-list-count)))
             "\n")))
 
@@ -371,7 +371,7 @@ the right of them fall off the window.  Anchors past it are elided."
 (defun legu-list--insert-stale (snapshot)
   "Insert SNAPSHOT's stale regions.  Returns how many rows were drawn."
   (let ((rows nil))
-    (unless (eq legu-list--filter 'unread)
+    (unless (eq legu-list--filter 'unreviewed)
       (when-let* ((table (plist-get snapshot :stale)))
         (maphash (lambda (path entries)
                    (when (legu-list--scoped-p path)
@@ -430,7 +430,7 @@ the right of them fall off the window.  Anchors past it are elided."
                (and ranges (car (car ranges)))
                (and ranges (cdr (car ranges)))
                'next
-               (concat (legu-list--count (plist-get r :unreviewed) "unread")
+               (concat (legu-list--count (plist-get r :unreviewed) "unreviewed")
                        " "
                        (legu-list--count (plist-get r :stale) "stale" 'legu-stale)
                        "   "
@@ -580,10 +580,10 @@ opened -- that one is always confirmed by name."
                           '(4)))))))
 
 (defun legu-list-toggle-filter ()
-  "Cycle the queue filter: everything, stale only, unread only."
+  "Cycle the queue filter: everything, stale only, unreviewed only."
   (interactive)
   (setq legu-list--filter (pcase legu-list--filter
-                            ('all 'stale) ('stale 'unread) (_ 'all)))
+                            ('all 'stale) ('stale 'unreviewed) (_ 'all)))
   (legu-list--render)
   (message "legu: showing %s" legu-list--filter))
 

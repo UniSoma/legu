@@ -153,6 +153,25 @@
     (is (= {"eligible-files" 4 "eligible-lines" 12 "unreviewed" 10 "reviewed" 2 "stale" 0}
            (json/parse-string (:out machine))))))
 
+(deftest status-and-next-tables-say-the-glossarys-words
+  ;; lgu-01m26gbjmqjc: the tables headed their columns READ, UNREAD and READ
+  ;; RANGES and called a file "read in full", words CONTEXT.md avoids for the
+  ;; reviewed and unreviewed states. No JSON key moved.
+  (let [dir (scratch-repo!)
+        _ (legu! dir "mark" "alpha.txt:1-2")
+        _ (legu! dir "mark" "sub/beta.txt")
+        status (legu! dir "status")
+        queue (legu! dir "next")
+        machine (json/parse-string (:out (legu! dir "status" "--json")))]
+    (is (= [0 0] [(:exit status) (:exit queue)]))
+    (is (re-find #"(?m)^FILES  3 with gaps · 1 fully reviewed$" (:out status)))
+    (is (re-find #"(?m)^  PATH +REVIEWED  STALE  UNREVIEWED  TOTAL  REVIEWED RANGES$" (:out status)))
+    (is (re-find #"(?m)^  sub/beta\.txt +3 +0 +0 +3  fully reviewed$" (:out status)))
+    (is (re-find #"(?m)^  PATH +UNREVIEWED  STALE  TO READ$" (:out queue)))
+    (is (not (re-find #"UNREAD|READ RANGES|read in full|  READ  " (str (:out status) (:out queue)))))
+    (is (= #{"path" "total" "reviewed" "stale" "unreviewed" "ranges"}
+           (set (mapcat keys (get machine "files")))))))
+
 (deftest version-names-the-version-and-the-store-schema
   ;; The Emacs package parses this line for its handshake (emacs/legu.el:599),
   ;; and the literals track VERSION and sidecar-schema in legu.

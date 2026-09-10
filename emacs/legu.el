@@ -1595,11 +1595,11 @@ With a prefix argument REFRESH, refresh the snapshot first."
             (message "legu: no snapshot yet; %s to take one"
                      (key-description (kbd "C-u C-c r c")))
           (let ((lines (max 1 (plist-get cov :lines))))
-            (message "legu: %d eligible lines · %.1f%% read · %.1f%% stale · %.1f%% never read  (%s)"
+            (message "legu: %d eligible lines · %.1f%% unreviewed · %.1f%% reviewed · %.1f%% stale  (%s)"
                      (plist-get cov :lines)
+                     (* 100.0 (/ (float (plist-get cov :never)) lines))
                      (* 100.0 (/ (float (plist-get cov :reviewed)) lines))
                      (* 100.0 (/ (float (plist-get cov :stale)) lines))
-                     (* 100.0 (/ (float (plist-get cov :never)) lines))
                      (legu-snapshot-age-string snapshot))))))))
 
 (defun legu-snapshot-age-string (snapshot)
