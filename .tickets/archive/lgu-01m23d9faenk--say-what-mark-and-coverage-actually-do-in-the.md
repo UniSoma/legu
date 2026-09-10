@@ -1,21 +1,26 @@
 ---
 id: lgu-01m23d9faenk
 title: Say what mark and coverage actually do, in the project's own words
-status: open
+status: closed
 type: chore
 priority: 3
 mode: afk
 created: '2026-09-09T15:41:24.174873952Z'
-updated: '2026-09-09T16:26:11.725312762Z'
+updated: '2026-09-10T20:33:08.701321213Z'
+closed: '2026-09-10T20:33:08.701321213Z'
 acceptance:
 - title: mark's help no longer says the region was reviewed at HEAD, and says what ADR-0006 and CONTEXT.md say instead
-  done: false
+  done: true
 - title: coverage's help, its human row label and its JSON key agree with each other and with CONTEXT.md, or an ADR records why the output keeps a word the vocabulary avoids
-  done: false
+  done: true
 - title: If the JSON key changes, emacs/legu.el is updated with it and the store schema or version implication is stated
-  done: false
+  done: true
 - title: The CLI suite pins whichever wording wins
-  done: false
+  done: true
+links:
+- lgu-01m26gbjmqjc
+external_refs:
+- git:1a25d15871f52c524d87caa0507b6d5b422f1da1
 ---
 
 ## Description
@@ -31,3 +36,11 @@ Two strings of user-facing help disagree with CONTEXT.md and an ADR. Both were c
 **2026-09-09T16:26:11.725312762Z**
 
 Found while moving the CLI onto babashka.cli (lgu-01m238vjgnh6), which carried both strings verbatim from the old usage blob into the dispatch tree's :doc lines. Parented off that epic on close: the wording predates the move and outlives it, and the coverage half may imply a breaking JSON-key change for the Emacs package, which is not that epic's decision to make.
+
+**2026-09-10T20:33:08.701321213Z**
+
+mark's help now reads "mark a region reviewed as it stands in the working tree", per ADR-0006 and CONTEXT.md. coverage's help, rows and JSON key all say unreviewed / reviewed / stale; the old "read" row went too, since "read" is on Reviewed's Avoid list. The JSON key never-read became unreviewed, matching status and next, so no ADR was needed.
+
+Correction to AC3's premise: emacs/legu.el never read the never-read key; it derives its own :never. Only three ERT assertions read it, and they moved. Store schema stays 3. VERSION goes to 0.5.0 for the breaking coverage --json key; the Emacs minimum CLI version stays 0.4.1.
+
+The remaining read/unread wording in status, next and the Emacs views is lgu-01m26gbjmqjc.

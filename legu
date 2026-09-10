@@ -30,7 +30,7 @@
 ;; non-UTF-8 byte must not be invisible to the content hash.
 (def ENC "ISO-8859-1")
 
-(def VERSION "0.4.1")
+(def VERSION "0.5.0")
 
 ;; legu is moving its argument parsing onto the babashka.cli bundled with
 ;; babashka, whose option spec and generated help arrived in this release. The
@@ -1257,8 +1257,8 @@
   (let [denominator (max 1 lines)
         width (max 8 (min 40 (- (terminal-width) 34)))]
     (println)
-    (doseq [[label n code] [["never read" unreviewed :dim]
-                            ["read" reviewed :green]
+    (doseq [[label n code] [["unreviewed" unreviewed :dim]
+                            ["reviewed" reviewed :green]
                             ["stale" stale :yellow]]]
       (let [fraction (/ (double n) denominator)]
         (println (str "  " (paint code (format "%-12s" label))
@@ -1453,7 +1453,7 @@
         stl (reduce + 0 (map :stale files))
         unr (- total rev stl)]
     (emit opts {:eligible-files (count files) :eligible-lines total
-                :never-read unr :reviewed rev :stale stl}
+                :unreviewed unr :reviewed rev :stale stl}
           (fn [_]
             (if (empty? files)
               (println "no eligible files")
@@ -1488,7 +1488,7 @@
    order, :optional the ones it can run without, and :options the keys of
    command-options it reads."
   [{:cmds ["mark"] :run cmd-mark :arguments [:target] :options [:reviewer]
-    :doc "mark a region reviewed at HEAD"}
+    :doc "mark a region reviewed as it stands in the working tree"}
    {:cmds ["ticket"] :run cmd-ticket :arguments [:target :id]
     :doc "anchor a ticket reference"}
    {:cmds ["forget"] :run cmd-forget :arguments [:target]
@@ -1503,7 +1503,7 @@
    {:cmds ["next"] :run cmd-next :arguments [] :options [:limit :order]
     :doc "what to read next"}
    {:cmds ["coverage"] :run cmd-coverage :arguments []
-    :doc "never-read / reviewed / stale"}])
+    :doc "unreviewed / reviewed / stale"}])
 
 (def argument-specs
   "What each argument is called in help and what its value must satisfy. The

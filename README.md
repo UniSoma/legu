@@ -55,7 +55,7 @@ untested: legu is verified against bash, zsh and fish.
 ## Use
 
 ```
-legu mark src/core.clj:40-95           # mark a region reviewed at HEAD
+legu mark src/core.clj:40-95           # mark a region reviewed as it stands now
 legu mark src/core.clj                 # the whole file
 legu ticket src/core.clj:40-95 lgu-01k7  # anchor a ticket reference to a region
 legu forget src/core.clj:40-95         # drop that region's state
@@ -90,11 +90,11 @@ appear anywhere on the line:
 
 ```
 $ legu --version
-legu 0.4.1 (store schema 3)
+legu 0.5.0 (store schema 3)
 
 $ legu --version --json
 {
-  "version" : "0.4.1",
+  "version" : "0.5.0",
   "schema" : 3
 }
 ```
@@ -318,8 +318,8 @@ file hash alone.
 
 ## Eligibility
 
-`legu coverage` prints the three numbers over eligible lines — never read,
-read, stale — as three rows on one bar scale, which is the block `legu status`
+`legu coverage` prints the three numbers over eligible lines — unreviewed,
+reviewed, stale — as three rows on one bar scale, which is the block `legu status`
 opens with. It counts every tracked file except those matching `.reviewignore`
 at the repo root — vendored code, generated files, lockfiles, fixtures.
 `.reviewignore` uses gitignore syntax, and git itself does the matching, so

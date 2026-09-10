@@ -126,11 +126,38 @@
     (doseq [page [mark status regions queue stale]]
       (is (str/includes? page "--json") page))))
 
+(deftest mark-and-coverage-describe-themselves-in-the-glossarys-words
+  ;; lgu-01m23d9faenk: mark's help said "reviewed at HEAD" and coverage's said
+  ;; "never-read", against ADR-0006 and CONTEXT.md. HEAD is only the commit a
+  ;; record cites; what was read is the working tree.
+  (let [dir (scratch-repo!)
+        mark (:out (legu! dir "mark" "--help"))
+        coverage (:out (legu! dir "coverage" "--help"))]
+    (is (str/includes? mark "mark a region reviewed as it stands in the working tree"))
+    (is (not (str/includes? mark "HEAD")))
+    (is (str/includes? coverage "unreviewed / reviewed / stale"))
+    (is (not (str/includes? coverage "never")))))
+
+(deftest coverage-rows-and-json-keys-say-the-same-three-states
+  ;; lgu-01m23d9faenk renamed the never-read row and JSON key, and the read row,
+  ;; to the glossary's words: the key now matches what status and next emit.
+  (let [dir (scratch-repo!)
+        _ (legu! dir "mark" "alpha.txt:1-2")
+        human (legu! dir "coverage")
+        machine (legu! dir "coverage" "--json")]
+    (is (= [0 0] [(:exit human) (:exit machine)]))
+    (is (re-find #"(?m)^  unreviewed +10 " (:out human)))
+    (is (re-find #"(?m)^  reviewed +2 " (:out human)))
+    (is (re-find #"(?m)^  stale +0 " (:out human)))
+    (is (not (re-find #"never|(?m)^  read " (:out human))))
+    (is (= {"eligible-files" 4 "eligible-lines" 12 "unreviewed" 10 "reviewed" 2 "stale" 0}
+           (json/parse-string (:out machine))))))
+
 (deftest version-names-the-version-and-the-store-schema
   ;; The Emacs package parses this line for its handshake (emacs/legu.el:599),
   ;; and the literals track VERSION and sidecar-schema in legu.
   (let [{:keys [exit out err]} (legu! (scratch-repo!) "--version")]
-    (is (= [0 "legu 0.4.1 (store schema 3)\n" ""] [exit out err]))))
+    (is (= [0 "legu 0.5.0 (store schema 3)\n" ""] [exit out err]))))
 
 (deftest version-in-json-carries-the-same-two-fields
   (let [dir (scratch-repo!)
@@ -138,7 +165,7 @@
         before (legu! dir "--json" "--version")]
     ;; The space before each colon is cheshire's pretty printer, which every
     ;; --json output goes through in emit.
-    (is (= "{\n  \"version\" : \"0.4.1\",\n  \"schema\" : 3\n}\n" (:out after)))
+    (is (= "{\n  \"version\" : \"0.5.0\",\n  \"schema\" : 3\n}\n" (:out after)))
     (is (= (:out after) (:out before)))
     (is (= [0 0] [(:exit after) (:exit before)]))
     (is (= ["" ""] [(:err after) (:err before)]))))

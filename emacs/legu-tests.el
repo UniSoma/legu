@@ -854,7 +854,7 @@ every record over such a line stale."
       (should (= (plist-get mine :lines) (alist-get 'eligible-lines theirs)))
       (should (= (plist-get mine :reviewed) (alist-get 'reviewed theirs)))
       (should (= (plist-get mine :stale) (alist-get 'stale theirs)))
-      (should (= (plist-get mine :never) (alist-get 'never-read theirs)))
+      (should (= (plist-get mine :never) (alist-get 'unreviewed theirs)))
       (should (= (length queue) (length their-queue)))
       (cl-loop for row in queue
                for other in their-queue
@@ -895,7 +895,7 @@ record counts only where no reviewed one covers it, and the ranges
       (should (= 20 (alist-get 'eligible-lines coverage)))
       (should (= 14 (alist-get 'reviewed coverage)))
       (should (= 3 (alist-get 'stale coverage)))
-      (should (= 3 (alist-get 'never-read coverage))))))
+      (should (= 3 (alist-get 'unreviewed coverage))))))
 
 (ert-deftest legu-test-integration-warning-on-stderr-is-not-a-failure ()
   (legu-test--with-repo (list (cons "a.txt" "one\n"))
@@ -2029,7 +2029,7 @@ before review records: everything a rewrite must put straight."
     (let ((coverage (legu--parse-json (nth 1 (legu-test--legu "coverage" "--json"))))
           (next (legu--parse-json (nth 1 (legu-test--legu "next" "--json")))))
       (should (= 2 (alist-get 'eligible-lines coverage)))
-      (should (= 2 (alist-get 'never-read coverage)))
+      (should (= 2 (alist-get 'unreviewed coverage)))
       (should (member "empty.txt" (mapcar (lambda (f) (alist-get 'path f))
                                           (alist-get 'next next)))))
     (legu-test--legu "mark" "empty.txt")
