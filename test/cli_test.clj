@@ -9,6 +9,7 @@
 
 (require '[babashka.fs :as fs]
          '[babashka.process :as p]
+         '[cheshire.core :as json]
          '[clojure.string :as str]
          '[clojure.test :refer [deftest is run-tests]])
 
@@ -453,6 +454,28 @@
     (write-sidecar! dir "alpha.txt"
                     "{\"start\":1,\"end\":1,\"reviewer\":\"x\",\"timestamp\":\"t\",\"commit\":\"-\",\"file-hash\":\"a\",\"content-hash\":\"b\"}\n")
     (refuses-the-sidecar dir "alpha.txt")))
+
+(deftest a-write-names-every-sidecar-it-cannot-read-in-path-order
+  ;; Many broken sidecars rather than one: each of the three writes names
+  ;; every sidecar it cannot read, and drops none.
+  (let [dir (scratch-repo!)
+        broken (sort (concat ["-weird.txt" "a:b.txt" "sub/beta.txt"]
+                             (for [i (range 40)] (format "gone/f%02d.txt" i))))
+        reason "schema 2 is not the schema legu writes (3)"]
+    (doseq [path broken]
+      (write-sidecar! dir path "{\"schema\":2}\n"))
+    (doseq [args [["mark" "alpha.txt:1-2" "--reviewer" reviewer]
+                  ["ticket" "alpha.txt:1-2" "T-1"]
+                  ["forget" "alpha.txt:1-2"]]]
+      (let [{:keys [exit out err]} (apply legu! dir (conj args "--json"))]
+        (is (= 0 exit) (pr-str args))
+        (is (= (for [path broken]
+                 (str "legu: cannot read " (fs/file dir ".review" (str path ".jsonl")) ": " reason))
+               (str/split-lines err))
+            (pr-str args))
+        (is (= (for [path broken] {:file (str ".review/" path ".jsonl") :reason reason})
+               (:errors (json/parse-string out true)))
+            (pr-str args))))))
 
 (deftest a-line-that-is-neither-record-nor-reference-is-refused
   (let [dir (scratch-repo!)]

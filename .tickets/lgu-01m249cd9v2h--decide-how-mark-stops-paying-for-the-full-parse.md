@@ -6,7 +6,7 @@ type: task
 priority: 2
 mode: hitl
 created: '2026-09-09T23:52:20.536743583Z'
-updated: '2026-09-10T14:36:30.035902080Z'
+updated: '2026-09-10T14:59:30.493337918Z'
 acceptance:
 - title: A note on this ticket records the decision, the measurement it rests on, and the ADR it touches if any
   done: false
@@ -103,3 +103,9 @@ the per-line parse-string it was first timed with. mark at 10,000 files and
 2.556 s before on EDN schema 2 against 1.170, 1.179, 1.206 s after on JSONL
 schema 3, 2.2x. Still above 500 ms on one core; the parallel parse of
 lgu-01m249cd6dgq is the next number.
+
+**2026-09-10T14:59:30.493337918Z**
+
+lgu-01m249cd6dgq's parallel parse landed (d00fdd7) on JSONL schema 3. mark at 10,000 files and 20 records, three fresh processes, warm page cache, every core of a 32-core i9-13900HX: 1.220, 1.239, 1.244 s before against 0.850, 0.827, 0.810 s after. The after runs spend about 3.7 s of CPU each. The one-core number is the before one, 1.17 to 1.21 s in the note above, since the parse is the only part made parallel.
+
+Both numbers this decision waited on are in: 1.2 s on one core and 0.83 s on 32. Neither meets the 500 ms target, so the format change and the parallel parse together are not enough, and one of the remaining options is still needed: the narrower contract or the parse-verdict cache outside the store.

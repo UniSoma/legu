@@ -428,6 +428,13 @@
   []
   (or @stored-cache (reset! stored-cache (store-listing))))
 
+(defn- parse-store!
+  "Parse every sidecar on every core, into the cache `read-state` answers
+   from. Each parse is independent of the others, and the writes that read
+   the whole store call this before they do."
+  []
+  (dorun (pmap parse-sidecar (stored-paths))))
+
 ;; ---------------------------------------------------------------- projection
 
 (defn parse-hunks
@@ -999,6 +1006,7 @@
    sidecars that cannot hold an obsolete record go unanchored. Every sidecar is
    still read, so a write names the ones legu cannot parse."
   [region kind obsolete?]
+  (parse-store!)
   (let [holders (vec (for [sidecar (stored-paths)
                            :let [state (read-state sidecar)]
                            :when (and state (can-hold-obsolete? (:path region) sidecar))]
@@ -1057,6 +1065,7 @@
                                  (and (= start (:start r)) (= end (:end r))))))
         dropped (atom 0)]
     (assert-readable! path)
+    (parse-store!)
     (when start (fetch-hunks! (concat (records) (ticket-records))))
     (doseq [sidecar (stored-paths)
             :let [state (read-state sidecar)]
