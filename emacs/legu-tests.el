@@ -859,6 +859,39 @@ every record over such a line stale."
                do (should (equal (legu-format-ranges (plist-get row :ranges))
                                  (alist-get 'ranges other)))))))
 
+(ert-deftest legu-test-integration-overlapping-records-count-each-line-once ()
+  "Records that overlap or touch count their shared lines once, a stale
+record counts only where no reviewed one covers it, and the ranges
+`status' and `next' print join records that touch."
+  (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 20) "\n")))
+    (legu-test--legu "mark" "a.txt:1-5")
+    (legu-test--legu "mark" "a.txt:3-8")
+    (legu-test--legu "mark" "a.txt:9-10")
+    (legu-test--legu "mark" "a.txt:12-16")
+    (with-temp-file (expand-file-name "a.txt" root)
+      (insert (legu-test--lines 13) "\nchanged\n"
+              (mapconcat (lambda (i) (format "line %d" i)) (number-sequence 15 20) "\n")
+              "\n"))
+    (legu-test--legu "mark" "a.txt:15-18")
+    (let ((file (car (alist-get 'files (legu--parse-json
+                                        (nth 1 (legu-test--legu "status" "--json"))))))
+          (queued (car (alist-get 'next (legu--parse-json
+                                         (nth 1 (legu-test--legu "next" "--json"))))))
+          (coverage (legu--parse-json (nth 1 (legu-test--legu "coverage" "--json")))))
+      (should (equal "a.txt" (alist-get 'path file)))
+      (should (= 14 (alist-get 'reviewed file)))
+      (should (= 3 (alist-get 'stale file)))
+      (should (= 3 (alist-get 'unreviewed file)))
+      (should (equal "1-10,15-18" (alist-get 'ranges file)))
+      (should (equal "a.txt" (alist-get 'path queued)))
+      (should (= 3 (alist-get 'stale queued)))
+      (should (= 3 (alist-get 'unreviewed queued)))
+      (should (equal "11-14,19-20" (alist-get 'ranges queued)))
+      (should (= 20 (alist-get 'eligible-lines coverage)))
+      (should (= 14 (alist-get 'reviewed coverage)))
+      (should (= 3 (alist-get 'stale coverage)))
+      (should (= 3 (alist-get 'never-read coverage))))))
+
 (ert-deftest legu-test-integration-warning-on-stderr-is-not-a-failure ()
   (legu-test--with-repo (list (cons "a.txt" "one\n"))
     (with-temp-file (expand-file-name "untracked.txt" root) (insert "hello\n"))

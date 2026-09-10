@@ -205,8 +205,10 @@
   [lines]
   (sha256 (str/join "\n" (map str/trim lines))))
 
-(defn read-worktree
-  "{:kind :text|:binary|:missing|:unreadable, :text, :lines, :hash}"
+(defn- read-worktree-file
+  "{:kind :text|:binary|:missing|:unreadable, :text, :lines, :line-count, :hash}.
+   :lines is a delay: only anchoring a file that changed since review looks
+   at its lines, so a file that did not never pays to split them."
   [path]
   (let [f (fs/file *root* path)]
     (if-not (fs/regular-file? f)
@@ -217,8 +219,23 @@
           (if (binary-bytes? bs)
             {:kind :binary :hash h}
             (let [s (String. bs ENC)]
-              {:kind :text :text s :lines (lines-of s) :hash h})))
+              {:kind :text :text s :hash h
+               :line-count (count (lines-of s))
+               :lines (delay (lines-of s))})))
         (catch java.io.IOException _ {:kind :unreadable})))))
+
+(def ^:private worktree-cache (atom {}))
+
+(defn read-worktree
+  "The working-tree file at `path`, read once per run: legu never writes a
+   source file, so a second read would find what the first did. Holding a
+   vector of every line of every file took a whole-store read past half a
+   gigabyte, which is why :lines stays unsplit until something forces it."
+  [path]
+  (or (get @worktree-cache path)
+      (let [c (read-worktree-file path)]
+        (swap! worktree-cache assoc path c)
+        c)))
 
 (defn read-at-commit [commit path]
   (when *git?*
@@ -244,7 +261,7 @@
 
 (def ^:private sidecar-schema 2)
 
-(defn- parse-sidecar
+(defn- parse-sidecar-file
   "{:state s} for the sidecar of `path` when legu can read it, {:error reason}
    when it cannot. Only the layout legu writes today is read: there are no
    stores outside this repository, so an older schema is refused rather than
@@ -266,6 +283,19 @@
                    " is not the schema legu writes (" sidecar-schema ")")}
       bad-range {:error bad-range}
       :else {:state (assoc v :path path)})))
+
+(def ^:private sidecar-cache (atom {}))
+(def ^:private stored-cache (atom nil))
+
+(defn- parse-sidecar
+  "The parse of `path`'s sidecar, kept until `save-state!` writes it. Every
+   command still parses every sidecar, for `emit` to name the ones it cannot
+   read, but no sidecar twice."
+  [path]
+  (or (get @sidecar-cache path)
+      (let [r (parse-sidecar-file path)]
+        (swap! sidecar-cache assoc path r)
+        r)))
 
 (defn- blank-state [path]
   {:path path :regions [] :tickets []})
@@ -331,6 +361,8 @@
 (defn save-state!
   "Writes the sidecar, or removes it when nothing is left to record."
   [{:keys [path regions tickets] :as state}]
+  (swap! sidecar-cache dissoc path)
+  (reset! stored-cache nil)
   (let [f (store-file path)]
     (if (and (empty? regions) (empty? tickets))
       (when (fs/exists? f) (fs/delete f))
@@ -338,7 +370,7 @@
           (spit f (render-sidecar state))))
     state))
 
-(defn stored-paths []
+(defn- store-listing []
   (let [dir (fs/file *root* ".review")]
     (if (fs/exists? dir)
       (->> (fs/glob dir "**.edn" {:hidden true})
@@ -347,6 +379,12 @@
            (map #(subs % 0 (- (count %) 4)))
            sort vec)
       [])))
+
+(defn stored-paths
+  "The paths the store holds a sidecar for, listed once per run and again
+   after `save-state!`, which can add one or remove one."
+  []
+  (or @stored-cache (reset! stored-cache (store-listing))))
 
 ;; ---------------------------------------------------------------- projection
 
@@ -414,7 +452,7 @@
   (if (= (:hash cur) file-hash)
     ;; byte-identical to review time: nothing to project
     {:state :reviewed :path p :start start :end end :moved? (not= p path)}
-    (let [new-lines (:lines cur)
+    (let [new-lines @(:lines cur)
           len (inc (- end start))
           old-text (read-at-commit commit path)
           hunks (when old-text (diff-hunks old-text (:text cur)))
@@ -557,32 +595,69 @@
              {:path p
               :binary (= :binary (:kind c))
               :lines (case (:kind c)
-                       :text (max 1 (count (:lines c)))
+                       :text (max 1 (:line-count c))
                        :binary 1
                        0)})))))
 
 (defn resolved-by-path
-  "path -> {:reviewed #{lines} :stale #{lines}} at current locations."
+  "path -> {:reviewed [[start end] ...] :stale [[start end] ...]} at current
+   locations, one range per record, overlapping as the records do."
   []
   (reduce (fn [acc r]
             (let [res (resolve-region r)]
               (if (= :missing (:state res))
                 acc
-                (let [ls (if (:start res)
-                           (set (range (:start res) (inc (:end res))))
-                           #{1})]
-                  (update-in acc [(:path res) (:state res)] (fnil into #{}) ls)))))
+                (update-in acc [(:path res) (:state res)] (fnil conj [])
+                           (if (:start res) [(:start res) (:end res)] [1 1])))))
           {}
           (records)))
 
-(defn file-coverage [by-path {:keys [path lines]}]
-  (let [all (set (range 1 (inc lines)))
-        rev (set/intersection (get-in by-path [path :reviewed] #{}) all)
-        stl (set/intersection (set/difference (get-in by-path [path :stale] #{}) rev) all)]
+;; Coverage counts lines through [start end] ranges rather than sets of line
+;; numbers: twenty overlapping records on each of 10,000 files are millions
+;; of boxed line numbers as sets, and a few hundred thousand pairs as ranges.
+
+(defn- merge-ranges
+  "Sorted, disjoint ranges covering the lines of `ivs` that fall inside
+   1..total. Ranges that touch are joined, as `fmt-ranges` prints them."
+  [ivs total]
+  (reduce (fn [acc [s e]]
+            (let [s (max 1 s) e (min total e)]
+              (cond
+                (> s e) acc
+                (and (seq acc) (<= s (inc (second (peek acc)))))
+                (conj (pop acc) [(first (peek acc)) (max e (second (peek acc)))])
+                :else (conj acc [s e]))))
+          []
+          (sort ivs)))
+
+(defn- subtract-ranges
+  "The lines of the merged ranges `ivs` outside the merged `minus`."
+  [ivs minus]
+  (reduce (fn [acc [s e]]
+            (loop [s s acc acc minus minus]
+              (let [[ms me] (first minus)]
+                (cond
+                  (or (nil? ms) (> ms e)) (if (<= s e) (conj acc [s e]) acc)
+                  (< me s) (recur s acc (rest minus))
+                  :else (recur (inc me)
+                               (if (< s ms) (conj acc [s (dec ms)]) acc)
+                               (rest minus))))))
+          []
+          ivs))
+
+(defn- range-lines [ivs]
+  (reduce + 0 (map (fn [[s e]] (inc (- e s))) ivs)))
+
+(defn file-coverage
+  "One eligible file's three numbers, and its reviewed lines as merged
+   ranges. A stale line that a reviewed record also covers is reviewed."
+  [by-path {:keys [path lines]}]
+  (let [rev (merge-ranges (get-in by-path [path :reviewed]) lines)
+        stl (subtract-ranges (merge-ranges (get-in by-path [path :stale]) lines) rev)]
     {:path path :total lines
-     :reviewed (count rev) :stale (count stl)
-     :unreviewed (- lines (count rev) (count stl))
-     :reviewed-lines rev :stale-lines stl}))
+     :reviewed (range-lines rev) :stale (range-lines stl)
+     :unreviewed (- lines (range-lines rev) (range-lines stl))
+     :reviewed-ranges rev}))
 
 ;; ---------------------------------------------------------------- helpers
 
@@ -620,21 +695,12 @@
       (System/getenv "USER")
       "unknown"))
 
-(defn ranges
-  "Collapse a set of line numbers into [[start end] ...]."
-  [line-set]
-  (->> (sort line-set)
-       (reduce (fn [acc n]
-                 (if (and (seq acc) (= n (inc (second (peek acc)))))
-                   (conj (pop acc) [(first (peek acc)) n])
-                   (conj acc [n n])))
-               [])))
-
-(defn fmt-ranges [line-set]
-  (if (empty? line-set)
+(defn fmt-ranges
+  "Merged ranges as 1-5,7,9-12, or - when there are none."
+  [ivs]
+  (if (empty? ivs)
     "-"
-    (str/join "," (map (fn [[a b]] (if (= a b) (str a) (str a "-" b)))
-                       (ranges line-set)))))
+    (str/join "," (map (fn [[a b]] (if (= a b) (str a) (str a "-" b))) ivs))))
 
 (defn fmt-region [{:keys [start end]}]
   (if start (str ":" start "-" end) ""))
@@ -728,7 +794,7 @@
         cur (read-worktree path)]
     (when (#{:missing :unreadable} (:kind cur))
       (die (str (if (= :unreadable (:kind cur)) "cannot read file: " "no such file: ") path)))
-    (let [total (count (:lines cur))
+    (let [total (or (:line-count cur) 0)
           opaque? (or (= :binary (:kind cur)) (zero? total))]
       (when (and opaque? (:start target))
         (die (str path (if (= :binary (:kind cur))
@@ -751,7 +817,7 @@
            :timestamp (now)}
     opaque (assoc :opaque true)
     (not opaque) (assoc :start start :end end
-                        :content-hash (norm-hash (subvec (:lines cur) (dec start) end)))))
+                        :content-hash (norm-hash (subvec @(:lines cur) (dec start) end)))))
 
 (defn- same-region?
   "Does a stored record currently sit exactly where this region does?"
@@ -814,7 +880,7 @@
 
 (defn cmd-mark [{:keys [opts]}]
   (let [{:keys [path start end opaque cur] :as region} (region-of (:target opts))
-        whole? (or opaque (and (= 1 start) (= end (count (:lines cur)))))]
+        whole? (or opaque (and (= 1 start) (= end (:line-count cur))))]
     (assert-readable! path)
     (purge! {:path path :start start :end end :whole? whole?} :regions contained?)
     (let [state (load-state path)
@@ -972,11 +1038,11 @@
             [eligible exclusion] (path-eligibility path ignored)
             condition (name (:kind cur))
             total (case (:kind cur)
-                    :text (max 1 (count (:lines cur)))
+                    :text (max 1 (:line-count cur))
                     :binary 1
                     0)
             opaque (or (= :binary (:kind cur))
-                       (and (= :text (:kind cur)) (empty? (:lines cur))))
+                       (and (= :text (:kind cur)) (zero? (:line-count cur))))
             regions (->> review-records
                          (map current-record)
                          (sort-by (juxt #(or (:start %) 0)
@@ -1059,8 +1125,8 @@
                       "  " (cell (:unreviewed f) digits nil)
                       "  " (num (:total f))
                       "  " (cond (:read-in-full f) (paint :dim "read in full")
-                                 (empty? (:reviewed-lines f)) (paint :dim "none")
-                                 :else (fmt-ranges (:reviewed-lines f)))))))))
+                                 (empty? (:reviewed-ranges f)) (paint :dim "none")
+                                 :else (fmt-ranges (:reviewed-ranges f)))))))))
 
 (defn render-tickets [tickets]
   (when (seq tickets)
@@ -1096,8 +1162,8 @@
                      (filter #(under? (:path %) prefix))
                      (sort-by (juxt :path #(or (:start %) 0))))
         data {:coverage coverage
-              :files (mapv #(-> (dissoc % :reviewed-lines :stale-lines :read-in-full)
-                                (assoc :ranges (fmt-ranges (:reviewed-lines %))))
+              :files (mapv #(-> (dissoc % :reviewed-ranges :read-in-full)
+                                (assoc :ranges (fmt-ranges (:reviewed-ranges %))))
                            files)
               :tickets (mapv #(-> (select-keys % [:path :start :end :ticket])
                                   (assoc :state (name (:state %))))
@@ -1176,7 +1242,7 @@
                                  (shorten-path (:path f) path-width))
                     "  " (cell (:unreviewed f) digits nil)
                     "  " (cell (:stale f) digits :yellow)
-                    "  " (if (= (count (:todo f)) (:total f))
+                    "  " (if (= (range-lines (:todo f)) (:total f))
                            (paint :dim "whole file")
                            (fmt-ranges (:todo f))))))))
 
@@ -1199,9 +1265,8 @@
           gaps (->> with-gaps
                     (take limit)
                     (mapv (fn [f]
-                            (assoc f :todo (into (sorted-set)
-                                                 (remove (:reviewed-lines f)
-                                                         (range 1 (inc (:total f)))))))))]
+                            (assoc f :todo (subtract-ranges [[1 (:total f)]]
+                                                               (:reviewed-ranges f))))))]
       (emit opts {:next (mapv (fn [f] {:path (:path f)
                                        :unreviewed (:unreviewed f)
                                        :stale (:stale f)
