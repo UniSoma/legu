@@ -6,7 +6,7 @@ type: chore
 priority: 3
 mode: afk
 created: '2026-09-10T21:04:41.236901325Z'
-updated: '2026-09-10T21:12:22.430980132Z'
+updated: '2026-09-10T21:41:53.304272234Z'
 closed: '2026-09-10T21:12:22.430980132Z'
 acceptance:
 - title: Prompts, help-echo and cells that name the Reviewed state say reviewed
@@ -15,6 +15,8 @@ acceptance:
   done: true
 links:
 - lgu-01m26gbjmqjc
+external_refs:
+- git:33fbcf39e82341f99cd7537fdb4f485203b2cc83
 ---
 
 ## Description
