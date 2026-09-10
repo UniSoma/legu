@@ -22,7 +22,11 @@ for it: parsing 10,000 sidecars of 20 records takes 0.75 s against 2.37 s for
 the EDN layout in babashka, and the hand-written EDN reader in `legu.el` goes
 away. Schema 2 is refused, not migrated: no store existed outside this
 repository when the format changed. Supersedes ADR-0007. ADR-0014's ordering
-and merge arguments stand; its layout does not.
+and merge arguments stand; its layout does not. One merge outcome changes
+with it: two branches re-reading neighbouring records edit two adjacent
+lines with no unchanged line between them, which git reports as a conflict
+where the hash lines of the multi-line layout used to keep the edits apart.
+Edits to records one line apart still merge.
 
 ## Considered options
 

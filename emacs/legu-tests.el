@@ -5,7 +5,7 @@
 
 ;;; Commentary:
 
-;; Two tiers.  The first is pure: range arithmetic, the EDN reader, the
+;; Two tiers.  The first is pure: range arithmetic, the sidecar reader, the
 ;; derived numbers, painting precedence, overlay lifecycle.  The second
 ;; drives the real legu binary against a real scratch git repository, and
 ;; skips itself when that binary is not installed.  A third group covers
@@ -92,31 +92,22 @@
   (should-not (legu--ranges-member '((1 . 5) (9 . 12)) 7)))
 
 
-;;;; The EDN reader
+;;;; The sidecar reader
 
 (defconst legu-test--sidecar "\
-{:schema 2
- :regions [
-  {:start 10 :end 20
-   :reviewer \"a \\\"quoted\\\" name\" :timestamp \"2026-08-28T10:00:28.735025487Z\"
-   :commit \"c439a98805096d822fb420ffa3a37564ad124f58\"
-   :file-hash \"be9c2c9ae93d3e3f9279aed5036406b927bac3257ea456970903bb0bcf9c65f9\"
-   :content-hash \"d65c7b\"}
- ]
- :tickets [
-  {:opaque true
-   :ticket \"lgu-01k7\" :timestamp \"2026-08-28T10:00:28.735025487Z\"
-   :commit \"c439a98805096d822fb420ffa3a37564ad124f58\"
-   :file-hash \"be9c2c\"}
- ]}
+{\"schema\":3}
+{\"start\":10,\"end\":20,\"reviewer\":\"a \\\"quoted\\\" name\",\"timestamp\":\"2026-08-28T10:00:28Z\",\"commit\":\"c439a98805096d822fb420ffa3a37564ad124f58\",\"file-hash\":\"be9c2c9ae93d3e3f9279aed5036406b927bac3257ea456970903bb0bcf9c65f9\",\"content-hash\":\"d65c7b\"}
+{\"opaque\":true,\"ticket\":\"lgu-01k7\",\"timestamp\":\"2026-08-28T10:00:28Z\",\"commit\":\"c439a98805096d822fb420ffa3a37564ad124f58\",\"file-hash\":\"be9c2c\"}
 ")
 
-(ert-deftest legu-test-edn-reads-a-real-sidecar ()
-  (let* ((data (legu--read-edn legu-test--sidecar))
+(ert-deftest legu-test-sidecar-reads-a-real-sidecar ()
+  (let* ((data (legu--read-sidecar legu-test--sidecar))
          (region (car (alist-get 'regions data)))
          (ticket (car (alist-get 'tickets data))))
-    (should (eql 2 (alist-get 'schema data)))
+    (should (eql 3 (alist-get 'schema data)))
     (should-not (assq 'path data))
+    (should (= 1 (length (alist-get 'regions data))))
+    (should (= 1 (length (alist-get 'tickets data))))
     (should (eql 10 (alist-get 'start region)))
     (should (eql 20 (alist-get 'end region)))
     (should (equal "a \"quoted\" name" (alist-get 'reviewer region)))
@@ -124,22 +115,36 @@
     (should (eq t (alist-get 'opaque ticket)))
     (should-not (assq 'start ticket))))
 
-(ert-deftest legu-test-edn-never-signals ()
-  (dolist (bad (list "<<<<<<< HEAD\n{:schema 1}\n=======\n"
-                     "{:schema 1, :path"
-                     "#inst \"2026-01-01\""
-                     "[1 2 3]"
-                     ""
-                     "{:a #{1 2}}"))
-    (should-not (legu--read-edn bad))))
+(ert-deftest legu-test-sidecar-reads-the-escapes-json-prints ()
+  (let ((data (legu--read-sidecar
+               "{\"schema\":3}\n{\"reviewer\":\"a\\fb\\bc\\td\\u00e9\\\\\"}\n")))
+    (should (equal (alist-get 'reviewer (car (alist-get 'regions data)))
+                   "a\fb\bc\tdé\\"))))
 
-(ert-deftest legu-test-edn-schema-gate ()
+(ert-deftest legu-test-sidecar-never-signals ()
+  "Anything that is not a whole sidecar reads as nil: a line that does not
+parse is not skipped, since the lines a merge conflict wraps are records."
+  (dolist (bad (list "<<<<<<< HEAD\n{\"schema\":3}\n=======\n"
+                     "{\"schema\":3}\n{\"start\":1,\"end\":2,\"reviewer\""
+                     "{\"schema\":3}\n[1,2,3]\n"
+                     "{\"schema\":3}\n\n{\"start\":1,\"end\":2,\"reviewer\":\"r\"}\n"
+                     "{\"schema\":3}\n{\"start\":1,\"end\":2,\"reviewer\":\"r\"} {\"x\":1}\n"
+                     "{\"schema\":3}\n{\"start\":1,\"end\":2,\"reviewer\":\"r\"}garbage\n"
+                     "{\"schema\":3}\n{\"start\":1,\"end\":2,\"file-hash\":\"a\"}\n"
+                     "{\"start\":1,\"end\":2,\"reviewer\":\"r\"}\n"
+                     "[1,2,3]"
+                     "3"
+                     ""
+                     "{:schema 2\n :regions [\n ]\n :tickets [\n ]}\n"))
+    (should-not (legu--read-sidecar bad))))
+
+(ert-deftest legu-test-sidecar-schema-gate ()
   (let* ((dir (make-temp-file "legu-test" t))
-         (side (expand-file-name ".review/a.txt.edn" dir)))
+         (side (expand-file-name ".review/a.txt.jsonl" dir)))
     (unwind-protect
         (progn
           (make-directory (file-name-directory side) t)
-          (with-temp-file side (insert "{:schema 3\n :regions [\n ]\n :tickets [\n ]}\n"))
+          (with-temp-file side (insert "{\"schema\":4}\n"))
           (let ((legu--schema-warned nil))
             (should-not (plist-get (legu-sidecar-records dir "a.txt") :ok)))
           (with-temp-file side (insert legu-test--sidecar))
@@ -147,7 +152,7 @@
           (should (= 1 (length (plist-get (legu-sidecar-records dir "a.txt") :regions)))))
       (delete-directory dir t))))
 
-(ert-deftest legu-test-edn-missing-sidecar-is-ok-and-empty ()
+(ert-deftest legu-test-sidecar-missing-sidecar-is-ok-and-empty ()
   (let ((dir (make-temp-file "legu-test" t)))
     (unwind-protect
         (let ((r (legu-sidecar-records dir "nope.txt")))
@@ -346,7 +351,7 @@
       ;; A broken sidecar flags the store without taking the numbers away.
       (puthash "/tmp/x/" (list :coverage (list :lines 1000 :reviewed 618 :stale 20
                                                :never 362 :files 5)
-                               :errors (list (list :file ".review/b.txt.edn"
+                               :errors (list (list :file ".review/b.txt.jsonl"
                                                    :reason "not a review record")))
                legu--snapshots)
       (should (equal (substring-no-properties (legu--lighter)) " legu 61%!"))
@@ -358,7 +363,7 @@
     (puthash "/tmp/x/"
              (list :state 'fresh :started (current-time)
                    :coverage (list :lines 10 :reviewed 5 :stale 0 :never 5 :files 1)
-                   :errors (list (list :file ".review/b.txt.edn"
+                   :errors (list (list :file ".review/b.txt.jsonl"
                                        :reason "not a review record")))
              legu--snapshots)
     (with-temp-buffer
@@ -366,7 +371,7 @@
       (setq legu-list--root "/tmp/x/")
       (legu-list--render)
       (let ((text (substring-no-properties (buffer-string))))
-        (should (string-match-p "\\.review/b\\.txt\\.edn" text))
+        (should (string-match-p "\\.review/b\\.txt\\.jsonl" text))
         (should (string-match-p "not a review record" text))
         ;; The numbers next to it are this snapshot's, not the last good one's.
         (should (string-match-p "read +5" text))
@@ -380,7 +385,7 @@
     (puthash "/tmp/x/"
              (list :state 'error :started (current-time)
                    :error (list :kind 'cli-failed :message "legu: git not found")
-                   :errors (list (list :file ".review/b.txt.edn" :reason "stale")))
+                   :errors (list (list :file ".review/b.txt.jsonl" :reason "stale")))
              legu--snapshots)
     (with-temp-buffer
       (legu-list-mode)
@@ -389,7 +394,7 @@
       (let ((text (substring-no-properties (buffer-string))))
         (should (string-match-p "every legu command is failing" text))
         (should (string-match-p "git not found" text))
-        (should-not (string-match-p "b\\.txt\\.edn" text))))))
+        (should-not (string-match-p "b\\.txt\\.jsonl" text))))))
 
 
 (ert-deftest legu-test-list-render-survives-fontification ()
@@ -908,8 +913,8 @@ record counts only where no reviewed one covers it, and the ranges
 
 (defun legu-test--break-sidecar (root path)
   "Overwrite PATH's sidecar under ROOT with an unmerged conflict."
-  (with-temp-file (expand-file-name (concat ".review/" path ".edn") root)
-    (insert "<<<<<<< HEAD\n{:schema 1}\n=======\nnonsense\n>>>>>>> other\n")))
+  (with-temp-file (expand-file-name (concat ".review/" path ".jsonl") root)
+    (insert "<<<<<<< HEAD\n{\"schema\":3}\n=======\nnonsense\n>>>>>>> other\n")))
 
 (ert-deftest legu-test-integration-one-broken-sidecar-does-not-down-the-cli ()
   (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 10) "\n"))
@@ -938,7 +943,7 @@ record counts only where no reviewed one covers it, and the ranges
       (should-not (seq-find (lambda (f) (equal "b.txt" (alist-get 'path f)))
                             (alist-get 'files data)))
       ;; Root-relative, once per file however many times it was loaded.
-      (should (equal '(".review/b.txt.edn")
+      (should (equal '(".review/b.txt.jsonl")
                      (mapcar (lambda (e) (alist-get 'file e)) errors)))
       (should (stringp (alist-get 'reason (car errors)))))
     (let ((cov (legu--parse-json (nth 1 (legu-test--legu "coverage" "--json")))))
@@ -957,7 +962,7 @@ record counts only where no reviewed one covers it, and the ranges
     (should (legu-test--wait
              (lambda () (plist-get (legu-snapshot root) :errors))))
     (should (eq 'fresh (plist-get (legu-snapshot root) :state)))
-    (should (equal '(".review/b.txt.edn")
+    (should (equal '(".review/b.txt.jsonl")
                    (mapcar (lambda (e) (plist-get e :file))
                            (plist-get (legu-snapshot root) :errors))))
     (should (= 5 (plist-get (legu-coverage-numbers root) :reviewed)))))
@@ -970,7 +975,7 @@ record counts only where no reviewed one covers it, and the ranges
     (legu-test--legu "mark" "a.txt:1-5")
     (legu-test--legu "mark" "b.txt:1-5")
     (legu-test--break-sidecar root "b.txt")
-    (let* ((sidecar (expand-file-name ".review/b.txt.edn" root))
+    (let* ((sidecar (expand-file-name ".review/b.txt.jsonl" root))
            (bytes (with-temp-buffer (insert-file-contents sidecar) (buffer-string))))
       (dolist (args '(("mark" "b.txt:6-8")
                       ("ticket" "b.txt:6-8" "T-1")
@@ -1219,7 +1224,7 @@ the other's hunks when one command anchors both."
       (should (= 0 (nth 0 result)))
       (should-not (alist-get 'complete data))
       (should-not (alist-get 'regions data))
-      (should (equal ".review/a.txt.edn"
+      (should (equal ".review/a.txt.jsonl"
                      (alist-get 'file (car (alist-get 'errors data)))))
       (should (string-match-p "cannot read" (nth 2 result))))
     (let ((human (legu-test--legu "regions" "a.txt")))
@@ -1480,18 +1485,16 @@ git, the CLI or `legu-mode'."
 
 (ert-deftest legu-test-per-file-query-is-not-run-for-a-confirming-sidecar ()
   (legu-test--with-file 20
-    (let ((sidecar (expand-file-name ".review/b.txt.edn" root)))
+    (let ((sidecar (expand-file-name ".review/b.txt.jsonl" root)))
       (make-directory (file-name-directory sidecar) t)
       (with-temp-file sidecar
-        (insert (format "{:schema 2, :regions [{:start 1, :end 10,
- :file-hash \"%s\"}], :tickets []}"
+        (insert (format "{\"schema\":3}\n{\"start\":1,\"end\":10,\"reviewer\":\"r\",\"file-hash\":\"%s\"}\n"
                         (legu--file-hash file))))
       (legu--compute)
       (should-not legu--file-regions-wanted)
       ;; Break one hash and the file is no longer accounted for locally.
       (with-temp-file sidecar
-        (insert "{:schema 2, :regions [{:start 1, :end 10,
- :file-hash \"deadbeef\"}], :tickets []}"))
+        (insert "{\"schema\":3}\n{\"start\":1,\"end\":10,\"reviewer\":\"r\",\"file-hash\":\"deadbeef\"}\n"))
       (legu--compute)
       (should legu--file-regions-wanted))))
 
@@ -1598,13 +1601,9 @@ git, the CLI or `legu-mode'."
     (goto-char (legu--line-position 25))
     (should (equal (legu--target-region nil) '(21 . 25)))))
 
-(ert-deftest legu-test-edn-reads-the-escapes-clojure-prints ()
-  (let ((data (legu--read-edn "{:schema 1, :reviewer \"a\\fb\\bc\\td\"}")))
-    (should (equal (alist-get 'reviewer data) "a\fb\bc\td"))))
-
 (ert-deftest legu-test-a-sidecar-that-is-a-directory-is-not-an-error ()
   (let* ((dir (make-temp-file "legu-test" t))
-         (side (expand-file-name ".review/a.txt.edn" dir)))
+         (side (expand-file-name ".review/a.txt.jsonl" dir)))
     (unwind-protect
         (progn
           (make-directory side t)
@@ -1780,7 +1779,7 @@ The record then anchors, stale, at 11-21."
     (let ((sidecar (legu-sidecar-file root "a.txt")))
       (make-directory (file-name-directory sidecar) t)
       (with-temp-file sidecar
-        (insert "{:schema 1 :path \"a.txt\" :regions [] :tickets []}\n")))
+        (insert "{\"schema\":2}\n")))
     (let ((result (legu-test--legu "status" "--json")))
       (should (= 0 (nth 0 result)))
       (should (string-match-p "cannot read" (nth 2 result)))
@@ -1798,26 +1797,24 @@ The record then anchors, stale, at 11-21."
 
 (defconst legu-test--hex40 "[0-9a-f]\\{40\\}")
 (defconst legu-test--hex64 "[0-9a-f]\\{64\\}")
-(defconst legu-test--iso "[0-9TZ:.-]+")
+(defconst legu-test--iso "[0-9]\\{4\\}-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z")
 
 (defun legu-test--record-regexp (region who &optional commit file-hash content-hash)
-  "A regexp for one record as the CLI lays it out.
-REGION is \"start END\" or nil for an opaque record; WHO is the reviewer
-or ticket field with its value, e.g. \":reviewer \\\"Ada\\\"\".  The
-timestamp, commit and hashes default to any well-formed value."
-  (concat "  {" (if region (concat ":start " region) ":opaque true") "\n"
-          "   " who " :timestamp \"" legu-test--iso "\"\n"
-          "   :commit \"" (or commit legu-test--hex40) "\"\n"
-          "   :file-hash \"" (or file-hash legu-test--hex64) "\""
+  "A regexp for one record line as the CLI lays it out.
+REGION is \"START,\\\"end\\\":END\" or nil for an opaque record; WHO is the
+reviewer or ticket field with its value, e.g. \"\\\"reviewer\\\":\\\"Ada\\\"\".
+The timestamp, commit and hashes default to any well-formed value."
+  (concat "{" (if region (concat "\"start\":" region) "\"opaque\":true") ","
+          who ",\"timestamp\":\"" legu-test--iso "\","
+          "\"commit\":\"" (or commit legu-test--hex40) "\","
+          "\"file-hash\":\"" (or file-hash legu-test--hex64) "\""
           (if region
-              (concat "\n   :content-hash \"" (or content-hash legu-test--hex64) "\"}\n")
+              (concat ",\"content-hash\":\"" (or content-hash legu-test--hex64) "\"}\n")
             "}\n")))
 
 (defun legu-test--sidecar-regexp (regions tickets)
   "A regexp for a whole sidecar holding REGIONS and TICKETS record regexps."
-  (concat "\\`{:schema 2\n"
-          " :regions \\[\n" (apply #'concat regions) " \\]\n"
-          " :tickets \\[\n" (apply #'concat tickets) " \\]}\n\\'"))
+  (concat "\\`{\"schema\":3}\n" (apply #'concat regions) (apply #'concat tickets) "\\'"))
 
 (defun legu-test--sidecar-text (root path)
   "The bytes of PATH's sidecar under ROOT, or nil when there is none."
@@ -1835,18 +1832,19 @@ timestamp, commit and hashes default to any well-formed value."
     (with-temp-file file (insert text))))
 
 (ert-deftest legu-test-integration-sidecar-layout-is-fixed ()
-  "One field group per line, every hash whole, delimiters on their own lines."
+  "A header line, then one record per line in a fixed key order, every hash
+whole, no whitespace anywhere."
   (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 30) "\n")))
     (legu-test--legu "mark" "a.txt:10-20" "--reviewer" "Ada")
     (legu-test--legu "ticket" "a.txt:12-14" "T-1")
     (let ((text (legu-test--sidecar-text root "a.txt")))
       (should (string-match-p
                (legu-test--sidecar-regexp
-                (list (legu-test--record-regexp "10 :end 20" ":reviewer \"Ada\""))
-                (list (legu-test--record-regexp "12 :end 14" ":ticket \"T-1\"")))
+                (list (legu-test--record-regexp "10,\"end\":20" "\"reviewer\":\"Ada\""))
+                (list (legu-test--record-regexp "12,\"end\":14" "\"ticket\":\"T-1\"")))
                text))
-      (should-not (string-match-p ":path" text))
-      (should-not (string-match-p "," text)))))
+      (should-not (string-match-p "path" text))
+      (should-not (string-match-p "[ \t]" text)))))
 
 (ert-deftest legu-test-integration-opaque-records-carry-only-the-file-hash ()
   (legu-test--with-repo (list (cons "empty.txt" "")
@@ -1857,8 +1855,8 @@ timestamp, commit and hashes default to any well-formed value."
       (let ((text (legu-test--sidecar-text root path)))
         (should (string-match-p
                  (legu-test--sidecar-regexp
-                  (list (legu-test--record-regexp nil ":reviewer \"Ada\""))
-                  (list (legu-test--record-regexp nil ":ticket \"T-1\"")))
+                  (list (legu-test--record-regexp nil "\"reviewer\":\"Ada\""))
+                  (list (legu-test--record-regexp nil "\"ticket\":\"T-1\"")))
                  text))
         (should (equal (legu--file-hash (expand-file-name path root))
                        (alist-get 'file-hash
@@ -1866,21 +1864,23 @@ timestamp, commit and hashes default to any well-formed value."
                                                   :regions)))))))))
 
 (defun legu-test--tied-sidecar (root path order)
-  "A sidecar for PATH whose records tie on their region, in ORDER, hand-laid."
+  "A sidecar for PATH whose records tie on their region, in ORDER, hand-laid.
+Keys are out of order, there is whitespace, and ticket references come
+before review records: everything a rewrite must put straight."
   (let* ((hash (legu--file-hash (expand-file-name path root)))
          (region (lambda (who)
-                   (format "{:start 10, :end 20, :content-hash \"c\",
-      :file-hash \"%s\", :reviewer \"%s\", :commit \"abc\",
-      :timestamp \"2026-08-28T01:00:00Z\"}" hash who)))
+                   (format "{\"start\": 10, \"end\": 20, \"content-hash\": \"c\", \"file-hash\": \"%s\", \"reviewer\": \"%s\", \"commit\": \"abc\", \"timestamp\": \"2026-08-28T01:00:00Z\"}\n"
+                           hash who)))
          (ticket (lambda (id)
-                   (format "{:timestamp \"2026-08-28T01:00:00Z\", :commit \"abc\", :ticket \"%s\",
-   :content-hash \"c\", :file-hash \"%s\", :end 20, :start 10}" id hash))))
-    (concat "{:schema 2,\n :regions [" (funcall region (nth 0 order)) ",\n"
-            (funcall region (nth 1 order)) ",\n"
-            (format "{:start 25 :end 26 :file-hash \"%s\" :content-hash \"c\" :commit \"abc\"
- :reviewer \"Cy\" :timestamp \"2026-08-28T01:00:00Z\"}" hash)
-            "],\n :tickets [" (funcall ticket (nth 2 order)) ",\n"
-            (funcall ticket (nth 3 order)) "]}\n")))
+                   (format "{\"timestamp\":\"2026-08-28T01:00:00Z\",\"commit\":\"abc\",\"ticket\":\"%s\",\"content-hash\":\"c\",\"file-hash\":\"%s\",\"end\":20,\"start\":10}\n"
+                           id hash))))
+    (concat "{ \"schema\" : 3 }\n"
+            (funcall ticket (nth 2 order))
+            (funcall region (nth 0 order))
+            (format "{\"start\":25,\"end\":26,\"file-hash\":\"%s\",\"content-hash\":\"c\",\"commit\":\"abc\",\"reviewer\":\"Cy\",\"timestamp\":\"2026-08-28T01:00:00Z\"}\n"
+                    hash)
+            (funcall ticket (nth 3 order))
+            (funcall region (nth 1 order)))))
 
 (ert-deftest legu-test-integration-identical-state-writes-identical-bytes ()
   "Ties on the region are broken by the remaining fields, never by input order."
@@ -1892,10 +1892,10 @@ timestamp, commit and hashes default to any well-formed value."
         (let ((text (legu-test--sidecar-text root "a.txt")))
           (should (string-match-p
                    (legu-test--sidecar-regexp
-                    (list (legu-test--record-regexp "10 :end 20" ":reviewer \"Ada\"" "abc" nil "c")
-                          (legu-test--record-regexp "10 :end 20" ":reviewer \"Zed\"" "abc" nil "c"))
-                    (list (legu-test--record-regexp "10 :end 20" ":ticket \"T-1\"" "abc" nil "c")
-                          (legu-test--record-regexp "10 :end 20" ":ticket \"T-2\"" "abc" nil "c")))
+                    (list (legu-test--record-regexp "10,\"end\":20" "\"reviewer\":\"Ada\"" "abc" nil "c")
+                          (legu-test--record-regexp "10,\"end\":20" "\"reviewer\":\"Zed\"" "abc" nil "c"))
+                    (list (legu-test--record-regexp "10,\"end\":20" "\"ticket\":\"T-1\"" "abc" nil "c")
+                          (legu-test--record-regexp "10,\"end\":20" "\"ticket\":\"T-2\"" "abc" nil "c")))
                    text))
           (if first
               (should (equal first text))
@@ -1909,7 +1909,8 @@ timestamp, commit and hashes default to any well-formed value."
     (should-not (legu-test--sidecar-text root "a.txt"))
     ;; A sidecar that only ever held ticket references is one too.
     (legu-test--legu "ticket" "a.txt:1-2" "T-2")
-    (should (string-match-p " :regions \\[\n \\]\n" (legu-test--sidecar-text root "a.txt")))
+    (should (string-match-p "\\`{\"schema\":3}\n{\"start\":1,\"end\":2,\"ticket\":\"T-2\","
+                            (legu-test--sidecar-text root "a.txt")))
     (legu-test--legu "forget" "a.txt")
     (should-not (legu-test--sidecar-text root "a.txt"))))
 
@@ -2100,7 +2101,7 @@ PATHS are relative to `default-directory'."
 (defun legu-test--numstat (path)
   "Lines added and deleted in PATH's sidecar since HEAD, as (ADDED . DELETED)."
   (with-temp-buffer
-    (call-process "git" nil t nil "diff" "--numstat" "--" (concat ".review/" path ".edn"))
+    (call-process "git" nil t nil "diff" "--numstat" "--" (concat ".review/" path ".jsonl"))
     (goto-char (point-min))
     (if (looking-at "\\([0-9]+\\)\t\\([0-9]+\\)")
         (cons (string-to-number (match-string 1)) (string-to-number (match-string 2)))
@@ -2113,19 +2114,20 @@ PATHS are relative to `default-directory'."
     (legu-test--legu "mark" "a.txt:20-25")
     (legu-test--git "add" ".review")
     (legu-test--git "commit" "-qm" "reviews")
+    ;; A record is one line (ADR-0015), so each of these is one changed line.
     (legu-test--legu "forget" "a.txt:10-15")
-    (should (equal '(0 . 5) (legu-test--numstat "a.txt")))
+    (should (equal '(0 . 1) (legu-test--numstat "a.txt")))
     (legu-test--git "checkout" "-q" "--" ".review")
     (legu-test--legu "mark" "a.txt:30-35")
-    (should (equal '(5 . 0) (legu-test--numstat "a.txt")))
+    (should (equal '(1 . 0) (legu-test--numstat "a.txt")))
     (legu-test--git "checkout" "-q" "--" ".review")
     (legu-test--legu "ticket" "a.txt:12-13" "T-1")
-    (should (equal '(5 . 0) (legu-test--numstat "a.txt")))
+    (should (equal '(1 . 0) (legu-test--numstat "a.txt")))
     (legu-test--git "checkout" "-q" "--" ".review")
     ;; A re-read rewrites who and when, and the commit it was read at: HEAD
     ;; moved when the reviews were committed.
     (legu-test--legu "mark" "a.txt:10-15" "--reviewer" "Bea")
-    (should (equal '(2 . 2) (legu-test--numstat "a.txt")))))
+    (should (equal '(1 . 1) (legu-test--numstat "a.txt")))))
 
 (defun legu-test--merge (left right)
   "Apply LEFT and RIGHT on two branches from HEAD and merge them.
@@ -2164,15 +2166,26 @@ Each is a thunk run in the repository.  Returns git's exit status."
                              (plist-get records :regions)))))
     (should-not (assq 'errors (legu--parse-json (nth 1 (legu-test--legu "status" "--json")))))))
 
-(ert-deftest legu-test-integration-adjacent-edits-to-one-sidecar-merge ()
+(ert-deftest legu-test-integration-adjacent-edits-to-one-sidecar-conflict ()
+  "Two re-reads of neighbouring records are two changed lines with no
+unchanged line between them, which git cannot tell from two edits to one
+place.  Under the multi-line layout of ADR-0014 the hashes of the first
+record stood between the two edits and they merged; one record per line
+(ADR-0015) trades that for a one-line diff per mark.  Pinned so the trade
+is visible, not so it is wanted."
   (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 40) "\n")))
     (legu-test--committed-reviews)
-    (should (= 0 (legu-test--merge
-                  (lambda () (legu-test--legu "mark" "a.txt:1-5" "--reviewer" "Ada"))
-                  (lambda () (legu-test--legu "mark" "a.txt:10-15" "--reviewer" "Bea")))))
-    (let ((records (plist-get (legu-sidecar-records root "a.txt") :regions)))
-      (should (equal '("Ada" "Bea" "tester")
-                     (mapcar (lambda (r) (alist-get 'reviewer r)) records))))))
+    (should (/= 0 (legu-test--merge
+                   (lambda () (legu-test--legu "mark" "a.txt:1-5" "--reviewer" "Ada"))
+                   (lambda () (legu-test--legu "mark" "a.txt:10-15" "--reviewer" "Bea")))))
+    (let ((text (legu-test--sidecar-text root "a.txt")))
+      (should (string-match-p "^<<<<<<< " text))
+      (should (string-match-p "\"Ada\"" text))
+      (should (string-match-p "\"Bea\"" text)))
+    ;; The conflict markers make the sidecar unreadable to this package too.
+    ;; `legu-test-integration-separate-edits-to-one-sidecar-merge' is the
+    ;; case that still merges: records one line apart.
+    (should-not (plist-get (legu-sidecar-records root "a.txt") :ok))))
 
 (ert-deftest legu-test-integration-competing-edits-to-one-record-conflict ()
   (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 40) "\n")))
@@ -2187,7 +2200,7 @@ Each is a thunk run in the repository.  Returns git's exit status."
     ;; The conflict is explicit to legu too: named, and never written over.
     (let ((result (legu-test--legu "status" "--json")))
       (should (= 0 (nth 0 result)))
-      (should (equal ".review/a.txt.edn"
+      (should (equal ".review/a.txt.jsonl"
                      (alist-get 'file (car (alist-get 'errors
                                                       (legu--parse-json (nth 1 result))))))))
     (should (/= 0 (nth 0 (legu-test--legu "mark" "a.txt:20-25"))))))

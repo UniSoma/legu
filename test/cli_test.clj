@@ -129,7 +129,7 @@
   ;; The Emacs package parses this line for its handshake (emacs/legu.el:599),
   ;; and the literals track VERSION and sidecar-schema in legu.
   (let [{:keys [exit out err]} (legu! (scratch-repo!) "--version")]
-    (is (= [0 "legu 0.4.1 (store schema 2)\n" ""] [exit out err]))))
+    (is (= [0 "legu 0.4.1 (store schema 3)\n" ""] [exit out err]))))
 
 (deftest version-in-json-carries-the-same-two-fields
   (let [dir (scratch-repo!)
@@ -137,7 +137,7 @@
         before (legu! dir "--json" "--version")]
     ;; The space before each colon is cheshire's pretty printer, which every
     ;; --json output goes through in emit.
-    (is (= "{\n  \"version\" : \"0.4.1\",\n  \"schema\" : 2\n}\n" (:out after)))
+    (is (= "{\n  \"version\" : \"0.4.1\",\n  \"schema\" : 3\n}\n" (:out after)))
     (is (= (:out after) (:out before)))
     (is (= [0 0] [(:exit after) (:exit before)]))
     (is (= ["" ""] [(:err after) (:err before)]))))
@@ -312,6 +312,155 @@
   (let [dir (scratch-repo!)]
     (doseq [args [["--badopt"] ["status" "--badopt"] ["--badopt" "status"]]]
       (fails-with dir args "unknown option: --badopt"))))
+
+;; ---------------------------------------------------------------- store
+
+;; The sidecar is the one file legu writes, and ADR-0015 fixes its bytes: a
+;; header line, then one JSON object per record in a fixed key order with no
+;; whitespace. These cases read the file a command left behind.
+
+(defn- sidecar-lines
+  "The lines of `path`'s sidecar under dir, or nil when there is none."
+  [dir path]
+  (let [f (fs/file dir ".review" (str path ".jsonl"))]
+    (when (fs/exists? f) (str/split-lines (slurp f)))))
+
+(defn- sha256 [^String s]
+  (.formatHex (java.util.HexFormat/of)
+              (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                       (.getBytes s "ISO-8859-1"))))
+
+(def ^:private timestamp-re "\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\dZ")
+
+(deftest a-sidecar-is-a-header-line-and-one-json-line-per-record
+  (let [dir (scratch-repo!)]
+    (is (= 0 (:exit (legu! dir "mark" "alpha.txt:2-4" "--reviewer" reviewer))))
+    (is (= 0 (:exit (legu! dir "ticket" "alpha.txt:3" "T-1"))))
+    (let [[header record ticket & more] (sidecar-lines dir "alpha.txt")
+          content (sha256 "two\nthree\nfour")
+          file (sha256 (get fixture "alpha.txt"))]
+      (is (nil? more))
+      (is (= "{\"schema\":3}" header))
+      ;; Region first, then who and when, then the evidence: the hashes are a
+      ;; tail the eye skips. Timestamps are whole seconds.
+      (is (re-matches (re-pattern (str "\\{\"start\":2,\"end\":4,"
+                                       "\"reviewer\":\"Test Reviewer\","
+                                       "\"timestamp\":\"" timestamp-re "\","
+                                       "\"commit\":\"[0-9a-f]{40}\","
+                                       "\"file-hash\":\"" file "\","
+                                       "\"content-hash\":\"" content "\"\\}"))
+                      record)
+          record)
+      (is (re-matches (re-pattern (str "\\{\"start\":3,\"end\":3,"
+                                       "\"ticket\":\"T-1\","
+                                       "\"timestamp\":\"" timestamp-re "\","
+                                       "\"commit\":\"[0-9a-f]{40}\","
+                                       "\"file-hash\":\"" file "\","
+                                       "\"content-hash\":\"" (sha256 "three") "\"\\}"))
+                      ticket)
+          ticket))
+    ;; Nothing is written under the name the store used before ADR-0015.
+    (is (not (fs/exists? (fs/file dir ".review" "alpha.txt.edn"))))))
+
+(deftest an-opaque-record-keeps-only-the-flag-and-the-file-hash
+  (let [dir (scratch-repo!)]
+    (spit (fs/file dir "empty.txt") "")
+    (git! dir "add" "empty.txt")
+    (git! dir "commit" "-qm" "an empty file")
+    (is (= 0 (:exit (legu! dir "mark" "empty.txt" "--reviewer" reviewer))))
+    (let [[_ record] (sidecar-lines dir "empty.txt")]
+      (is (re-matches (re-pattern (str "\\{\"opaque\":true,"
+                                       "\"reviewer\":\"Test Reviewer\","
+                                       "\"timestamp\":\"" timestamp-re "\","
+                                       "\"commit\":\"[0-9a-f]{40}\","
+                                       "\"file-hash\":\"" (sha256 "") "\"\\}"))
+                      record)
+          record))))
+
+(deftest records-are-sorted-by-region-whatever-order-they-were-made-in
+  (let [dir (scratch-repo!)]
+    (legu! dir "mark" "alpha.txt:4-5" "--reviewer" reviewer)
+    (legu! dir "mark" "alpha.txt:1-2" "--reviewer" reviewer)
+    (legu! dir "ticket" "alpha.txt:5" "T-2")
+    (legu! dir "ticket" "alpha.txt:1" "T-1")
+    ;; Review records before ticket references, each run sorted by region.
+    (is (= ["{\"schema\":3}" "\"start\":1,\"end\":2,\"reviewer\"" "\"start\":4,\"end\":5,\"reviewer\""
+            "\"start\":1,\"end\":1,\"ticket\"" "\"start\":5,\"end\":5,\"ticket\""]
+           (map #(re-find #"\{\"schema\":3\}|\"start\":\d+,\"end\":\d+,\"(?:reviewer|ticket)\"" %)
+                (sidecar-lines dir "alpha.txt"))))))
+
+(deftest a-sidecar-with-nothing-left-in-it-is-removed
+  (let [dir (scratch-repo!)]
+    (legu! dir "mark" "alpha.txt:1-2" "--reviewer" reviewer)
+    (is (some? (sidecar-lines dir "alpha.txt")))
+    (is (= 0 (:exit (legu! dir "forget" "alpha.txt"))))
+    (is (nil? (sidecar-lines dir "alpha.txt")))))
+
+(defn- write-sidecar! [dir path text]
+  (let [f (fs/file dir ".review" (str path ".jsonl"))]
+    (fs/create-dirs (fs/parent f))
+    (spit f text)))
+
+(defn- refuses-the-sidecar
+  "Asserts that a write to `path` is refused naming its sidecar, that a read
+   still answers for everything else and names it under errors, and that the
+   sidecar's bytes are what they were. Returns the write's stderr, for the
+   caller to check the reason."
+  [dir path]
+  (let [f (fs/file dir ".review" (str path ".jsonl"))
+        bytes (slurp f)
+        {:keys [exit out err]} (legu! dir "mark" (str path ":1-1") "--reviewer" reviewer)]
+    (is (= [1 ""] [exit out]))
+    (is (str/starts-with? err (str "legu: cannot read " f ": ")) err)
+    (let [{:keys [exit out]} (legu! dir "status" "--json")]
+      (is (= 0 exit))
+      (is (str/includes? out (str "\"file\" : \".review/" path ".jsonl\""))))
+    (is (= bytes (slurp f)))
+    err))
+
+(deftest a-sidecar-that-does-not-parse-is-refused-whole
+  (let [dir (scratch-repo!)]
+    ;; A merge conflict, the way git leaves one.
+    (write-sidecar! dir "alpha.txt"
+                    "<<<<<<< HEAD\n{\"schema\":3}\n=======\n{\"schema\":3}\n>>>>>>> other\n")
+    (refuses-the-sidecar dir "alpha.txt")
+    ;; One line that does not parse, among lines that do: skipping it would
+    ;; read around a conflict by dropping the records inside it.
+    (write-sidecar! dir "sub/beta.txt"
+                    (str "{\"schema\":3}\n"
+                         "{\"start\":1,\"end\":1,\"reviewer\":\"x\",\"timestamp\":\"2026-01-01T00:00:00Z\","
+                         "\"commit\":\"-\",\"file-hash\":\"a\",\"content-hash\":\"b\"}\n"
+                         "{\"start\":2,\"end\":2,\"reviewer\":\"x\"\n"))
+    (is (str/includes? (refuses-the-sidecar dir "sub/beta.txt") "line 3"))
+    ;; A line holding a record and then something else: a conflict resolved
+    ;; by hand and half-joined. The JSON parser would stop at the record and
+    ;; call the line good.
+    (write-sidecar! dir "alpha.txt"
+                    (str "{\"schema\":3}\n"
+                         "{\"start\":1,\"end\":1,\"reviewer\":\"x\",\"timestamp\":\"t\","
+                         "\"commit\":\"-\",\"file-hash\":\"a\",\"content-hash\":\"b\"}>>>>>>> other\n"))
+    (is (str/includes? (refuses-the-sidecar dir "alpha.txt") "line 2"))
+    ;; A blank line is not a record either.
+    (write-sidecar! dir "alpha.txt" "{\"schema\":3}\n\n")
+    (is (str/includes? (refuses-the-sidecar dir "alpha.txt") "line 2: blank line"))))
+
+(deftest a-sidecar-of-another-schema-is-refused-not-migrated
+  (let [dir (scratch-repo!)]
+    (write-sidecar! dir "alpha.txt" "{\"schema\":2}\n")
+    (is (str/ends-with? (refuses-the-sidecar dir "alpha.txt")
+                        "schema 2 is not the schema legu writes (3)\n"))
+    ;; The header is the first line; a record there is not one.
+    (write-sidecar! dir "alpha.txt"
+                    "{\"start\":1,\"end\":1,\"reviewer\":\"x\",\"timestamp\":\"t\",\"commit\":\"-\",\"file-hash\":\"a\",\"content-hash\":\"b\"}\n")
+    (refuses-the-sidecar dir "alpha.txt")))
+
+(deftest a-line-that-is-neither-record-nor-reference-is-refused
+  (let [dir (scratch-repo!)]
+    (write-sidecar! dir "alpha.txt"
+                    "{\"schema\":3}\n{\"start\":1,\"end\":1,\"timestamp\":\"t\",\"commit\":\"-\",\"file-hash\":\"a\"}\n")
+    (is (str/includes? (refuses-the-sidecar dir "alpha.txt") "not a review record"))
+    (write-sidecar! dir "alpha.txt" "{\"schema\":3}\n[1,2,3]\n")
+    (is (str/includes? (refuses-the-sidecar dir "alpha.txt") "not a review record"))))
 
 ;; ---------------------------------------------------------------- completion
 
@@ -555,6 +704,28 @@
 (deftest the-running-babashka-satisfies-the-floor
   (is (nil? (legu.main/babashka-too-old (System/getProperty "babashka.version") floor)))
   (is (= 0 (:exit (legu! (scratch-repo!) "--version")))))
+
+(deftest the-same-state-renders-as-the-same-bytes
+  ;; Called directly: through the command line every record carries the second
+  ;; it was made in, so two orders of the same marks cannot be compared byte
+  ;; for byte. The literal is the layout ADR-0015 fixes.
+  (let [render #'legu.main/render-sidecar
+        a {:start 10 :end 20 :reviewer "a \"quoted\" name" :timestamp "2026-08-28T10:00:28Z"
+           :commit "c439a988" :file-hash "be9c" :content-hash "d65c"}
+        b {:start 1 :end 5 :reviewer "b" :timestamp "2026-08-28T10:00:28Z"
+           :commit "c439a988" :file-hash "be9c" :content-hash "0000"}
+        ;; An opaque record made from a region still carries nil bounds.
+        o {:opaque true :start nil :end nil :content-hash nil
+           :ticket "lgu-01k7" :timestamp "2026-08-28T10:00:29Z" :commit "c439a988" :file-hash "be9c"}
+        t {:start 1 :end 1 :ticket "T-1" :timestamp "2026-08-28T10:00:29Z"
+           :commit "c439a988" :file-hash "be9c" :content-hash "0000"}
+        expected (str "{\"schema\":3}\n"
+                      "{\"start\":1,\"end\":5,\"reviewer\":\"b\",\"timestamp\":\"2026-08-28T10:00:28Z\",\"commit\":\"c439a988\",\"file-hash\":\"be9c\",\"content-hash\":\"0000\"}\n"
+                      "{\"start\":10,\"end\":20,\"reviewer\":\"a \\\"quoted\\\" name\",\"timestamp\":\"2026-08-28T10:00:28Z\",\"commit\":\"c439a988\",\"file-hash\":\"be9c\",\"content-hash\":\"d65c\"}\n"
+                      "{\"opaque\":true,\"ticket\":\"lgu-01k7\",\"timestamp\":\"2026-08-28T10:00:29Z\",\"commit\":\"c439a988\",\"file-hash\":\"be9c\"}\n"
+                      "{\"start\":1,\"end\":1,\"ticket\":\"T-1\",\"timestamp\":\"2026-08-28T10:00:29Z\",\"commit\":\"c439a988\",\"file-hash\":\"be9c\",\"content-hash\":\"0000\"}\n")]
+    (is (= expected (render {:regions [a b] :tickets [o t]})))
+    (is (= expected (render {:regions [b a] :tickets [t o]})))))
 
 (let [{:keys [fail error]} (try (run-tests) (finally (run! fs/delete-tree @scratch-dirs)))]
   (System/exit (if (pos? (+ fail error)) 1 0)))

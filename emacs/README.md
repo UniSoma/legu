@@ -137,7 +137,7 @@ ticket references at point. A buffer edit or a newer describe request discards
 an older asynchronous answer.
 
 1. **The sidecar and a file hash.** Opening a file reads
-   `.review/<path>.edn` and hashes the file — no subprocess at all. A record
+   `.review/<path>.jsonl` and hashes the file — no subprocess at all. A record
    whose stored `file-hash` still matches is exactly the case the CLI's own
    anchoring answers immediately, so it can be painted with no process. A file
    whose every record matches this way is the one case that runs nothing else.
@@ -289,7 +289,7 @@ the mark it produced.
 emacs -Q --batch -L . -l legu-tests.el -f ert-run-tests-batch-and-exit
 ```
 
-151 tests. The pure half covers range arithmetic, the EDN reader, the derived
+151 tests. The pure half covers range arithmetic, the sidecar reader, the derived
 coverage numbers, the dired column's sums and formatting, painting
 precedence and the overlay lifecycle. The other
 half drives the real `legu` binary against real scratch git repositories —

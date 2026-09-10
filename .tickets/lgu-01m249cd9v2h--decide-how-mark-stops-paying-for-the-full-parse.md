@@ -6,7 +6,7 @@ type: task
 priority: 2
 mode: hitl
 created: '2026-09-09T23:52:20.536743583Z'
-updated: '2026-09-10T14:06:33.026813719Z'
+updated: '2026-09-10T14:36:30.035902080Z'
 acceptance:
 - title: A note on this ticket records the decision, the measurement it rests on, and the ADR it touches if any
   done: false
@@ -83,3 +83,23 @@ Sequence: lgu-01m25t7y4zzf, then lgu-01m249cd6dgq re-measured on the new
 format, then this decision with both numbers. If the two together bring mark
 under 500 ms on one machine's core count, the cache outside the store is not
 needed and the narrower contract is not either.
+
+**2026-09-10T14:29:07.792288049Z**
+
+lgu-01m25t7y4zzf landed JSON Lines sidecars. mark at 10,000 files and 20
+records, one core, three fresh processes, warm page cache: 2.560, 2.586,
+2.567 s before on EDN schema 2 against 1.911, 1.922, 1.918 s after on JSONL
+schema 3, the same commit shape, 1.34x. The parse is no longer 2.0 s of the
+total but it is still most of it, so the 500 ms target is not met on one
+core; the next number this decision waits on is lgu-01m249cd6dgq's parallel
+parse re-measured on the new format.
+
+**2026-09-10T14:36:30.035902080Z**
+
+Correction to the note above: the reader shipped by lgu-01m25t7y4zzf reads
+each line as a value sequence (a code-review finding), and is faster than
+the per-line parse-string it was first timed with. mark at 10,000 files and
+20 records, one core, three fresh processes, warm cache: 2.622, 2.593,
+2.556 s before on EDN schema 2 against 1.170, 1.179, 1.206 s after on JSONL
+schema 3, 2.2x. Still above 500 ms on one core; the parallel parse of
+lgu-01m249cd6dgq is the next number.

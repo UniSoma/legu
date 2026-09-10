@@ -281,122 +281,48 @@ structured pairs, this is the only call site to change."
       (insert-file-contents-literally file)
       (secure-hash 'sha256 (current-buffer)))))
 
-(defun legu--edn-skip (s i)
-  "Index of the next significant character in S at or after I.
-Whitespace, commas and line comments are insignificant in EDN."
-  (let ((n (length s)))
-    (while (and (< i n)
-                (let ((c (aref s i)))
-                  (cond
-                   ((memq c '(?\s ?\t ?\n ?\r ?,)) t)
-                   ((eq c ?\;) (while (and (< i n) (not (eq (aref s i) ?\n)))
-                                 (setq i (1+ i)))
-                    t)
-                   (t nil))))
-      (setq i (1+ i)))
-    i))
-
-(defun legu--edn-token (s i)
-  "Read the bare token in S starting at I.  Returns (TEXT . NEXT)."
-  (let ((n (length s)) (start i))
-    (while (and (< i n)
-                (not (memq (aref s i)
-                           '(?\s ?\t ?\n ?\r ?, ?\{ ?\} ?\[ ?\] ?\( ?\) ?\"))))
-      (setq i (1+ i)))
-    (cons (substring s start i) i)))
-
-(defun legu--edn-string (s i)
-  "Read the string in S whose opening quote is at I.  Returns (VALUE . NEXT)."
-  (let ((n (length s)) (i (1+ i)) (out nil) (done nil))
-    (while (and (not done) (< i n))
-      (let ((c (aref s i)))
-        (cond
-         ((eq c ?\") (setq done t i (1+ i)))
-         ((eq c ?\\)
-          (setq i (1+ i))
-          (when (< i n)
-            (push (pcase (aref s i)
-                    (?n ?\n) (?t ?\t) (?r ?\r) (?f ?\f) (?b ?\b)
-                    (?\\ ?\\) (?\" ?\") (c c))
-                  out)
-            (setq i (1+ i))))
-         (t (push c out) (setq i (1+ i))))))
-    (and done (cons (apply #'string (nreverse out)) i))))
-
-(defun legu--edn-read (s i)
-  "Read one EDN value from S at index I.  Returns (VALUE . NEXT), or nil.
-Nil means the input is not something this reader understands, which
-downgrades the caller rather than signalling."
-  (let ((i (legu--edn-skip s i)))
-    (when (< i (length s))
-      (pcase (aref s i)
-        (?\" (legu--edn-string s i))
-        (?\{ (legu--edn-read-map s (1+ i)))
-        (?\[ (legu--edn-read-seq s (1+ i) ?\]))
-        (?\( (legu--edn-read-seq s (1+ i) ?\)))
-        ((or ?\} ?\] ?\)) nil)
-        (_ (let* ((tok (legu--edn-token s i))
-                  (text (car tok)))
-             (cond
-              ((equal text "") nil)
-              ((equal text "nil") (cons nil (cdr tok)))
-              ((equal text "true") (cons t (cdr tok)))
-              ((equal text "false") (cons nil (cdr tok)))
-              ((string-prefix-p ":" text) (cons (intern (substring text 1)) (cdr tok)))
-              ((string-match-p "\\`[-+]?[0-9]+N?\\'" text)
-               (cons (string-to-number text) (cdr tok)))
-              ((string-match-p "\\`[-+]?[0-9]*\\.[0-9]+M?\\'" text)
-               (cons (string-to-number text) (cdr tok)))
-              ;; Anything else -- symbols, reader tags, sets -- is a shape
-              ;; this store never contains.  Refuse the whole file.
-              (t nil))))))))
-
-(defun legu--edn-read-seq (s i close)
-  "Read EDN values from S at I until CLOSE.  Returns (LIST . NEXT)."
-  (let ((items nil) (done nil) (fail nil))
-    (while (and (not done) (not fail))
-      (setq i (legu--edn-skip s i))
-      (cond
-       ((>= i (length s)) (setq fail t))
-       ((eq (aref s i) close) (setq done t i (1+ i)))
-       (t (let ((v (legu--edn-read s i)))
-            (if v (progn (push (car v) items) (setq i (cdr v)))
-              (setq fail t))))))
-    (unless fail (cons (nreverse items) i))))
-
-(defun legu--edn-read-map (s i)
-  "Read an EDN map from S at I.  Returns (ALIST . NEXT).
-Keyword keys become plain symbols, so :file-hash reads as `file-hash'."
-  (let ((pairs nil) (done nil) (fail nil))
-    (while (and (not done) (not fail))
-      (setq i (legu--edn-skip s i))
-      (cond
-       ((>= i (length s)) (setq fail t))
-       ((eq (aref s i) ?\}) (setq done t i (1+ i)))
-       (t (let ((k (legu--edn-read s i)))
-            (if (not k) (setq fail t)
-              (let ((v (legu--edn-read s (cdr k))))
-                (if (not v) (setq fail t)
-                  (push (cons (car k) (car v)) pairs)
-                  (setq i (cdr v)))))))))
-    (unless fail (cons (nreverse pairs) i))))
-
-(defun legu--read-edn (text)
-  "Parse TEXT, one pprinted legu sidecar, into an alist.  Never signals.
-A sidecar is a map; anything else -- a bare vector, a reader tag, a
-half-written merge conflict -- reads as nil and downgrades the caller."
+(defun legu--read-json-line (line)
+  "Parse LINE, one JSON object of a sidecar, into an alist.  Never signals.
+Keys become plain symbols, so \"file-hash\" reads as `file-hash'.  A line
+that is not a non-empty JSON object -- a merge marker, a truncated record,
+a bare number, an array, an object with something after it -- reads as nil
+and downgrades the caller."
   (condition-case nil
-      (let ((start (legu--edn-skip text 0)))
-        (when (and (< start (length text)) (eq (aref text start) ?\{))
-          (let ((v (legu--edn-read text start)))
-            (and v (consp (car v)) (car v)))))
+      (let ((v (json-parse-string line :object-type 'alist :array-type 'list
+                                  :null-object nil :false-object nil)))
+        (and (consp v) (consp (car v)) v))
     (error nil)))
+
+(defun legu--read-sidecar (text)
+  "Parse TEXT, one legu sidecar, into an alist.  Never signals.
+The alist has `schema' from the header line, `regions', the lines with a
+`reviewer', and `tickets', the lines with a `ticket'.  Anything that is
+not a well-formed sidecar -- a line that does not parse, a blank line, a
+header that is not one, a record that is neither kind -- reads as nil and
+downgrades the caller, exactly as the CLI refuses the whole file.  A header
+of another schema still reads, so the caller can say which schema it met."
+  (let* ((lines (split-string text "\n"))
+         ;; Only the newline that ends the file is not a line of its own.
+         (lines (if (equal "" (car (last lines))) (butlast lines) lines))
+         (header (and lines (legu--read-json-line (car lines))))
+         (regions nil) (tickets nil) (bad (not (assq 'schema header))))
+    (dolist (line (cdr lines))
+      (unless bad
+        (let ((record (legu--read-json-line line)))
+          (cond
+           ((assq 'reviewer record) (push record regions))
+           ((assq 'ticket record) (push record tickets))
+           (t (setq bad t))))))
+    (unless bad
+      (list (assq 'schema header)
+            (cons 'regions (nreverse regions))
+            (cons 'tickets (nreverse tickets))))))
 
 (defun legu-sidecar-file (root relpath)
   "Absolute path of the sidecar recording RELPATH under ROOT."
-  (expand-file-name (concat ".review/" relpath ".edn") root))
+  (expand-file-name (concat ".review/" relpath ".jsonl") root))
 
-(defconst legu-sidecar-schema 2
+(defconst legu-sidecar-schema 3
   "The sidecar schema this package reads, the one the CLI writes.")
 
 (defvar legu--schema-warned nil
@@ -413,7 +339,7 @@ the schema the CLI writes today is read, exactly as the CLI itself does."
       (let* ((text (with-temp-buffer
                      (insert-file-contents file)
                      (buffer-string)))
-             (data (legu--read-edn text)))
+             (data (legu--read-sidecar text)))
         (cond
          ((null data) (list :regions nil :tickets nil :ok nil))
          ((not (eql legu-sidecar-schema (alist-get 'schema data)))

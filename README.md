@@ -84,18 +84,18 @@ appear anywhere on the line:
 - `--json` — machine-readable output
 - `--help` — the commands and these three; `legu <command> --help` adds the
   arguments and options of one command
-- `--version` — the version and the store schema (the `:schema` every sidecar
-  carries) this legu writes, which is what a client needs before it trusts
-  what it reads out of `.review/`:
+- `--version` — the version and the store schema (the `schema` every sidecar's
+  first line carries) this legu writes, which is what a client needs before it
+  trusts what it reads out of `.review/`:
 
 ```
 $ legu --version
-legu 0.4.1 (store schema 2)
+legu 0.4.1 (store schema 3)
 
 $ legu --version --json
 {
   "version" : "0.4.1",
-  "schema" : 2
+  "schema" : 3
 }
 ```
 
@@ -264,50 +264,44 @@ Doom users are supported out of the box. See
 
 ## Storage
 
-`.review/` at the repo root, one EDN file per source file, mirroring the source
-tree — committed alongside the code. Source files are never modified.
+`.review/` at the repo root, one JSON Lines file per source file
+(`.review/<path>.jsonl`), mirroring the source tree — committed alongside the
+code. Source files are never modified.
 
-```clojure
-{:schema 2
- :regions [
-  {:start 40 :end 95
-   :reviewer "jonas" :timestamp "2026-08-28T01:00:00Z"
-   :commit "a1b2c3…"
-   :file-hash "…"
-   :content-hash "…"}
- ]
- :tickets [
-  {:start 52 :end 52
-   :ticket "lgu-01k7" :timestamp "2026-08-28T01:00:00Z"
-   :commit "a1b2c3…"
-   :file-hash "…"
-   :content-hash "…"}
- ]}
+```jsonl
+{"schema":3}
+{"start":40,"end":95,"reviewer":"jonas","timestamp":"2026-08-28T01:00:00Z","commit":"a1b2c3…","file-hash":"…","content-hash":"…"}
+{"start":52,"end":52,"ticket":"lgu-01k7","timestamp":"2026-08-28T01:00:00Z","commit":"a1b2c3…","file-hash":"…","content-hash":"…"}
 ```
 
-The layout is fixed so that git shows a change to the store as the lines of
-one record and nothing else. Every record is self-contained: its region on one
-line, who read it and when on the next, then the commit and each full hash on
-a line of its own. Collection delimiters sit on lines of their own, so adding
-or removing a record never touches its neighbours, and two people editing
-different records merge cleanly while two edits to the same record are a
-conflict git shows you. Records are sorted by region, ties broken by their
-remaining fields, so the same state is always the same bytes. The source path
-is not stored: the sidecar's own location says it. An opaque record has no
-line range and no content hash, only `:opaque true` and the file hash. Both
-collections are always written, and a sidecar with nothing left in it is
-removed. Sidecars of any other schema are refused, not migrated
-([ADR-0014](docs/adr/0014-fixed-layout-sidecars.md)).
+The first line is the header; every line after it is one record, so git shows
+a mark, a supersede or a forget as one changed line and nothing else. A line
+with a `reviewer` is a review record and a line with a `ticket` is a ticket
+reference. Keys come in a fixed order with no whitespace: the region, then who
+and when, then the commit and the two full hashes, so what you scan sits at the
+front of the line and the hashes are a tail the eye skips. Review records come
+first, then ticket references, each sorted by region with ties broken by their
+remaining fields, so the same state is always the same bytes and two people
+editing different records merge cleanly while two edits to the same record are
+a conflict git shows you. Timestamps are whole seconds. The source path is not
+stored: the sidecar's own location says it. An opaque record has no line range
+and no content hash, only `"opaque":true` and the file hash. A sidecar with
+nothing left in it is removed. Sidecars of any other schema are refused, not
+migrated ([ADR-0015](docs/adr/0015-jsonl-sidecars-one-record-per-line.md)).
+The committed `.gitattributes` marks `.review/**` as generated, which collapses
+sidecars in GitHub and GitLab review views.
 
 legu skips a sidecar it cannot parse — most often one with a merge conflict
-left in it — instead of dying on it. `status`, `stale`, `next` and `coverage`
+left in it — instead of dying on it. One line that does not parse makes the
+whole sidecar unreadable: skipping the line would read around a conflict by
+dropping the records inside it. `status`, `stale`, `next` and `coverage`
 answer for every other file and exit 0; `mark`, `ticket` and `forget` leave that
 sidecar alone and do their work everywhere else. Every command names what it
 skipped on stderr and adds an `errors` key to its `--json`:
 
 ```json
 {"files": [...], "tickets": [...],
- "errors": [{"file": ".review/src/core.clj.edn",
+ "errors": [{"file": ".review/src/core.clj.jsonl",
              "reason": "not a review record"}]}
 ```
 
@@ -319,7 +313,7 @@ the unreadable sidecar itself: writing it would drop the state it still holds.
 
 One file per source file rather than a single index, so two people reviewing at
 once do not conflict on every mark. A file with no line ranges — a binary, or an
-empty file — is stored as one opaque region (`:opaque true`) matched on the
+empty file — is stored as one opaque region (`"opaque":true`) matched on the
 file hash alone.
 
 ## Eligibility

@@ -7,11 +7,11 @@
             [babashka.fs :as fs]
             [babashka.process :as p]
             [cheshire.core :as json]
-            [clojure.edn :as edn]
             [clojure.set :as set]
             [clojure.string :as str])
   (:import [java.security MessageDigest]
            [java.time Instant]
+           [java.time.temporal ChronoUnit]
            [java.util HexFormat]))
 
 (def ^:dynamic *root* ".")
@@ -248,7 +248,7 @@
 (defn store-path
   "Where `path`'s sidecar lives, relative to the repo root."
   [path]
-  (str ".review/" path ".edn"))
+  (str ".review/" path ".jsonl"))
 
 (defn store-file [path]
   (fs/file *root* (store-path path)))
@@ -259,30 +259,72 @@
 ;; would drop the state it holds.
 (def ^:private store-errors (atom (sorted-map)))
 
-(def ^:private sidecar-schema 2)
+(def ^:private sidecar-schema 3)
+
+(defn- parse-line
+  "The one JSON value on a sidecar line, or ::broken with the reason. Read
+   as a sequence rather than with parse-string, which stops at the end of
+   the first value and would pass a line with anything after it."
+  [line]
+  (try (let [values (doall (json/parsed-seq (java.io.StringReader. line) true))]
+         (if (= 1 (count values))
+           (first values)
+           [::broken (if (empty? values) "blank line" "more than one value on the line")]))
+       (catch Exception e
+         ;; Jackson's message goes on to name the source and the column,
+         ;; which a reader of stderr does not need.
+         [::broken (first (str/split-lines (or (ex-message e) "not JSON")))])))
+
+(defn- broken? [v]
+  (and (vector? v) (= ::broken (first v))))
+
+(defn- sidecar-lines
+  "The lines of a sidecar's text. Only the newline that ends the file is not
+   a line of its own: a blank line anywhere else reaches `parse-line` and is
+   refused there, where `split-lines` would have dropped it from the tail."
+  [^String text]
+  (let [v (vec (.split text "\n" -1))]
+    (if (= "" (peek v)) (pop v) v)))
+
+(defn- bad-range
+  "Why a record's line range is not one, or nil when it is."
+  [r]
+  (when-not (or (:opaque r)
+                (and (int? (:start r)) (int? (:end r))
+                     (pos? (:start r)) (<= (:start r) (:end r))))
+    (str "bad line range in " (pr-str r))))
 
 (defn- parse-sidecar-file
   "{:state s} for the sidecar of `path` when legu can read it, {:error reason}
-   when it cannot. Only the layout legu writes today is read: there are no
+   when it cannot. The layout is ADR-0015's: a header line, then one record
+   per line, a review record when it has a reviewer and a ticket reference
+   when it has a ticket. One line that does not parse makes the whole sidecar
+   unreadable rather than a line to skip, since the lines a merge conflict
+   wraps are records too and a write over them would lose them. There are no
    stores outside this repository, so an older schema is refused rather than
    migrated."
   [path]
-  (let [[v unreadable] (try [(edn/read-string (slurp (store-file path))) nil]
-                            (catch Exception e [nil (ex-message e)]))
-        bad-range (some (fn [r]
-                          (when-not (or (:opaque r)
-                                        (and (int? (:start r)) (int? (:end r))
-                                             (pos? (:start r)) (<= (:start r) (:end r))))
-                            (str "bad line range in " (pr-str r))))
-                        (when (map? v) (concat (:regions v) (:tickets v))))]
+  (let [[lines unreadable] (try [(sidecar-lines (slurp (store-file path))) nil]
+                                (catch Exception e [nil (ex-message e)]))
+        [header & records] (map parse-line lines)
+        review? #(contains? % :reviewer)
+        record? (fn [r] (and (map? r) (or (review? r) (contains? r :ticket))))
+        broken-line (first (keep-indexed (fn [i r] (when (broken? r) (str "line " (+ i 2) ": " (second r))))
+                                         records))
+        range-error (some bad-range records)]
     (cond
       unreadable {:error unreadable}
-      (not (map? v)) {:error "not a review record"}
-      (not= sidecar-schema (:schema v))
-      {:error (str "schema " (pr-str (:schema v))
+      (broken? header) {:error (second header)}
+      (not (map? header)) {:error "not a review record"}
+      (not= sidecar-schema (:schema header))
+      {:error (str "schema " (pr-str (:schema header))
                    " is not the schema legu writes (" sidecar-schema ")")}
-      bad-range {:error bad-range}
-      :else {:state (assoc v :path path)})))
+      broken-line {:error broken-line}
+      (not (every? record? records)) {:error "not a review record"}
+      range-error {:error range-error}
+      :else {:state {:path path
+                     :regions (vec (filter review? records))
+                     :tickets (vec (remove review? records))}})))
 
 (def ^:private sidecar-cache (atom {}))
 (def ^:private stored-cache (atom nil))
@@ -325,38 +367,38 @@
   (load-state path)
   nil)
 
-;; The sidecar layout is fixed so that git shows a mark, a supersede or a
-;; forget as the lines of one record and nothing else: one line for the
-;; region, one for who and when, and one per hash, never wrapped or
-;; shortened. Records are sorted on every field they hold, in this same
-;; order, so the same state is the same bytes whatever order it was reached in.
-(def ^:private record-lines
-  [[:opaque] [:start :end] [:reviewer :ticket :timestamp] [:commit] [:file-hash] [:content-hash]])
+;; A record is one line, so that git shows a mark, a supersede or a forget as
+;; one changed line and nothing else. The line is rendered by hand rather
+;; than by cheshire so the keys keep this order: what a human scans, the
+;; region and who and when, sits in the first sixty columns and the hashes
+;; are a tail the eye skips. Records are sorted on every field they hold, in
+;; this same order, so the same state is the same bytes whatever order it was
+;; reached in.
+(def ^:private record-keys
+  [:opaque :start :end :reviewer :ticket :timestamp :commit :file-hash :content-hash])
 
 (defn- render-record [record]
   (let [record (if (:opaque record)
                  (dissoc record :start :end :content-hash)
-                 (dissoc record :opaque))
-        lines (for [ks record-lines
-                    :let [fields (for [k ks :when (contains? record k)]
-                                   (str k " " (pr-str (get record k))))]
-                    :when (seq fields)]
-                (str/join " " fields))]
-    (str "  {" (str/join "\n   " lines) "}")))
+                 (dissoc record :opaque))]
+    (str "{"
+         (str/join "," (for [k record-keys :when (contains? record k)]
+                         (str (json/generate-string (name k)) ":"
+                              (json/generate-string (get record k)))))
+         "}")))
 
 (defn- record-order [record]
   (into [(or (:start record) 0) (or (:end record) 0)]
-        (for [k (flatten record-lines)] (str (get record k)))))
+        (for [k record-keys] (str (get record k)))))
 
-(defn- render-collection [k records]
-  (str " " k " [\n"
-       (str/join "" (map #(str (render-record %) "\n") (sort-by record-order records)))
-       " ]"))
-
-(defn- render-sidecar [{:keys [regions tickets]}]
-  (str "{:schema " sidecar-schema "\n"
-       (render-collection :regions regions) "\n"
-       (render-collection :tickets tickets) "}\n"))
+(defn- render-sidecar
+  "Render the header line, every review record sorted by region, then every
+   ticket reference sorted the same way."
+  [{:keys [regions tickets]}]
+  (str (json/generate-string {:schema sidecar-schema}) "\n"
+       (str/join "" (for [r (concat (sort-by record-order regions)
+                                    (sort-by record-order tickets))]
+                      (str (render-record r) "\n")))))
 
 (defn save-state!
   "Writes the sidecar, or removes it when nothing is left to record."
@@ -373,10 +415,10 @@
 (defn- store-listing []
   (let [dir (fs/file *root* ".review")]
     (if (fs/exists? dir)
-      (->> (fs/glob dir "**.edn" {:hidden true})
+      (->> (fs/glob dir "**.jsonl" {:hidden true})
            (filter fs/regular-file?)
            (map #(str (fs/relativize (fs/path dir) %)))
-           (map #(subs % 0 (- (count %) 4)))
+           (map #(subs % 0 (- (count %) (count ".jsonl"))))
            sort vec)
       [])))
 
@@ -771,7 +813,11 @@
           (when-not (exists? s) {:path path :start (line-number a) :end (line-number a)}))
         {:path s})))
 
-(defn now [] (str (Instant/now)))
+(defn now
+  "Stamp the moment as a whole second: a record's timestamp says when it was
+   made, and nanoseconds would only widen the line."
+  []
+  (str (.truncatedTo (Instant/now) ChronoUnit/SECONDS)))
 
 (defn reviewer [opts]
   (or (:reviewer opts)

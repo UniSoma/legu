@@ -1,0 +1,3 @@
+# Sidecars are legu's, one JSON line per record (ADR-0015). Marking them
+# generated collapses them in GitHub and GitLab review views.
+.review/** linguist-generated=true gitlab-generated=true
