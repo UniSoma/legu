@@ -766,6 +766,37 @@ then, which is how this suite acquired a flake."
         (should (equal (legu--file-hash (expand-file-name file root))
                        (alist-get 'file-hash record)))))))
 
+(ert-deftest legu-test-integration-a-cr-ending-a-line-stays-out-of-its-hash ()
+  "Pin the content hashes the CLI records for lines ending in CR.
+The values were observed from the CLI; `lines-of' in the CLI says why a
+CR before a final NEL goes too.  A change that moves any of them turns
+every record over such a line stale."
+  (legu-test--with-repo
+      (list (cons "a.txt" (concat "crlf\r\n"
+                                  "nel" (unibyte-string 13 #x85) "\n"
+                                  "crcr\r\r\n"
+                                  "plain\n")))
+    (dolist (line '(1 2 3 4))
+      (legu-test--legu "mark" (format "a.txt:%d-%d" line line)))
+    (should (equal (mapcar (lambda (record) (alist-get 'content-hash record))
+                           (plist-get (legu-sidecar-records root "a.txt") :regions))
+                   '("c613dc516f3260b7b0cd688c74447e4024a1bf958ad25ae2d543d04923f84194"
+                     "5d130d74b91ba83dc3a4a4802b0167550b8ad88406b33c1a702b9af3d113e11e"
+                     "1ee0bcebb5042f8ce63846fdccf46b2295c79453bf50e20c5ecdbaa5d24ca3a1"
+                     "a116c9ed46d6207734a43317d30fd88f52ac8634c37d904bbf4e41d865f90475")))))
+
+(ert-deftest legu-test-integration-a-nul-counts-only-in-the-first-8000-bytes ()
+  (legu-test--with-repo
+      (list (cons "inside.bin" (concat (make-string 7999 ?a) (unibyte-string 0) "\n"))
+            (cons "outside.txt" (concat (make-string 8000 ?a) (unibyte-string 0) "\n")))
+    (legu-test--legu "mark" "inside.bin")
+    (legu-test--legu "mark" "outside.txt")
+    (let ((record (lambda (path)
+                    (car (plist-get (legu-sidecar-records root path) :regions)))))
+      (should (alist-get 'opaque (funcall record "inside.bin")))
+      (should-not (alist-get 'opaque (funcall record "outside.txt")))
+      (should (alist-get 'content-hash (funcall record "outside.txt"))))))
+
 (ert-deftest legu-test-integration-tier0-paints-without-a-subprocess ()
   (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 40) "\n")))
     (legu-test--legu "mark" "a.txt:10-20")

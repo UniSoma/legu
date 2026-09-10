@@ -11,7 +11,8 @@
             [clojure.set :as set]
             [clojure.string :as str])
   (:import [java.security MessageDigest]
-           [java.time Instant]))
+           [java.time Instant]
+           [java.util HexFormat]))
 
 (def ^:dynamic *root* ".")
 (def ^:dynamic *git?* true)
@@ -171,8 +172,8 @@
 
 ;; ---------------------------------------------------------------- content
 
-(defn- hex [bs]
-  (apply str (map #(format "%02x" %) bs)))
+(defn- hex [^bytes bs]
+  (.formatHex (HexFormat/of) bs))
 
 (defn sha256 [^String s]
   (hex (.digest (MessageDigest/getInstance "SHA-256") (.getBytes s ENC))))
@@ -181,18 +182,23 @@
   (hex (.digest (MessageDigest/getInstance "SHA-256") bs)))
 
 (defn binary-bytes? [^bytes bs]
+  ;; latin-1 gives each byte its own char, so String.indexOf finds the NUL
+  ;; inside the JVM. An interpreted loop over the bytes was the largest cost of
+  ;; coverage: docs/experiments/mark-and-coverage-latency.md.
   (let [n (min (alength bs) 8000)]
-    (loop [i 0]
-      (cond (>= i n) false
-            (zero? (aget bs i)) true
-            :else (recur (inc i))))))
+    (not= -1 (.indexOf (String. bs 0 n ENC) "\u0000"))))
 
 (defn lines-of [^String s]
   (if (= "" s)
     []
-    (let [v (vec (str/split s #"\n" -1))
+    (let [v (vec (.split s "\n" -1))
           v (if (= "" (peek v)) (pop v) v)]
-      (mapv #(str/replace % #"\r$" "") v))))
+      ;; String.split on a one-character string skips the regex engine. The
+      ;; CR regex stays: java.util.regex.Pattern's $ also matches ahead of a
+      ;; final line terminator, which in latin-1 text means a CR or a NEL, so
+      ;; a line ending in CR NEL loses its CR and stored content hashes depend
+      ;; on that. Only a line holding a CR pays for the regex.
+      (mapv (fn [^String l] (if (str/includes? l "\r") (str/replace l #"\r$" "") l)) v))))
 
 (defn norm-hash
   "Hash of a line sequence, leading and trailing whitespace stripped per line."
@@ -423,8 +429,11 @@
         ;; elsewhere in the file — but only trust an unambiguous match: a block
         ;; that already had a twin at review time proves nothing about a move.
         (let [here (occurrences new-lines len content-hash 2)
-              there (when old-text (occurrences (lines-of old-text) len content-hash 2))]
-          (if (and (= 1 (count here)) (or (nil? there) (<= (count there) 1)))
+              unique? (= 1 (count here))
+              ;; the old text can only veto a unique match
+              there (when (and old-text unique?)
+                      (occurrences (lines-of old-text) len content-hash 2))]
+          (if (and unique? (or (nil? there) (<= (count there) 1)))
             {:state :reviewed :path p :start (first here) :end (+ (first here) len -1)
              :moved? true :reason "block moved"}
             (let [total (count new-lines)
