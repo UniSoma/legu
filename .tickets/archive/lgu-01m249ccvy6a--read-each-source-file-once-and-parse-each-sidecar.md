@@ -6,7 +6,7 @@ type: task
 priority: 2
 mode: afk
 created: '2026-09-09T23:52:20.091853319Z'
-updated: '2026-09-10T12:37:48.667105188Z'
+updated: '2026-09-10T12:40:50.768799400Z'
 closed: '2026-09-10T12:37:48.667105188Z'
 acceptance:
 - title: Clean coverage at 10,000 files and 20 records completes under 5 s on the experiment's fixture, measured with three fresh-process trials recorded on the ticket
@@ -102,3 +102,7 @@ The before check at 5,000 files, 20 records, stale took 18 minutes for the four 
 **2026-09-10T12:37:48.667105188Z**
 
 Coverage now reads each source file once, parses each sidecar once and lists the store once per run, and counts lines over merged ranges instead of per-line sets. Clean coverage at 10,000 files and 20 records dropped from 15.7 s to 3.45 s, with a peak RSS of 350 MB. coverage, status, stale and next print the same bytes on the 5,000-file fixtures. The line vector is a delay held in the cache entry, forced only when anchoring looks inside a changed file. That keeps memory under the 400 MB bound where the prototype, which kept every file's lines, reached 590 MB.
+
+**2026-09-10T12:40:50.768799400Z**
+
+mark also hashes identically before (28dd25c) and after (2a05369) on the 5,000-file, 20-record fixture, clean. The hashes are from bench.py check --ops mark,mark-inside and cover stdout plus the written sidecar, timestamps masked: mark outside every record b8058365905d, mark of lines 1-60 that supersedes records 038f742403d9. The change touched mark's read path (region-of reads the cache, and whole? compares against :line-count), which the read-command checks above do not reach.
