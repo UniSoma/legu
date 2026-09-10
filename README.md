@@ -114,8 +114,9 @@ To decide a region's current state, legu:
 
 1. tries to anchor it in the file it was read in — byte-identical file means
    *reviewed* immediately; otherwise it diffs that file as it was at the
-   reviewed commit against the working tree (`git diff --no-index -U0`), shifts
-   the region across the hunks above it, and re-hashes;
+   reviewed commit against the working tree (`git diff -U0`, one call per
+   commit for every file that needs it), shifts the region across the hunks
+   above it, and re-hashes;
 2. if that fails, looks for the block elsewhere in the same file;
 3. if that fails, follows the file: the rename git reports since the reviewed
    commit (at a low similarity threshold, so a small file that was renamed
@@ -398,11 +399,10 @@ The Emacs package has its own ERT suite, documented under
 ## Cost
 
 On a 700-file, 133k-line repository with ~1900 stored regions: `coverage` and
-`status` about 1s, `stale` about 1s, `mark` around a tenth of a second. Regions
-in files that have changed since they were read cost a `git show` and a diff
-each — with 80 files edited at once the read commands take about 2s, while
-`mark` does not move: it anchors only the records that could be sitting in the
-file it marks, never the whole store.
+`status` about 1s, `stale` about 1s, `mark` around a tenth of a second. Files
+that have changed since they were read are diffed against the commits their
+regions cite, one `git diff` per commit, while `mark` diffs only the records
+that could be sitting in the file it marks, never the whole store.
 
 `--order cochange` adds one `git log` over the whole history. On a clone of
 [redis](https://github.com/redis/redis) — 13,281 commits, 2009 to 2026 — with

@@ -1,8 +1,9 @@
 # Anchor by diff-hunk shifting plus a content hash, not `git log -L` or `git blame`
 
 To decide whether a reviewed region is still current, legu diffs the file as it
-was at the reviewed commit against the working tree (`git diff --no-index
--U0`), shifts the region across the hunks above it, and compares a hash of the
+was at the reviewed commit against the working tree (`git diff -U0 <commit>`
+for a file tracked at its recorded path, else `git diff --no-index -U0`),
+shifts the region across the hunks above it, and compares a hash of the
 region's normalized content. The original requirements recommended `git log
 -L` (accurate, slow on years of history) or `git blame -M -C` (fast, coarse).
 Both answer a proxy question — which commit last touched these lines — while

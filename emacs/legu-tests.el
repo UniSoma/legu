@@ -1097,6 +1097,59 @@ record counts only where no reviewed one covers it, and the ranges
       (should (eq t (alist-get 'moved region)))
       (should (equal "a.txt" (alist-get 'path (alist-get 'original region)))))))
 
+(ert-deftest legu-test-integration-a-record-older-than-its-file-stays-in-place ()
+  "A file marked before its first commit cites a commit it is not in.
+An edit below the region must not shift it."
+  (legu-test--with-repo (list (cons "seed.txt" "seed\n"))
+    (with-temp-file (expand-file-name "new.txt" root) (insert (legu-test--lines 20) "\n"))
+    (legu-test--legu "mark" "new.txt:5-10")
+    (legu-test--git "add" "new.txt")
+    (legu-test--git "commit" "-qm" "add new.txt")
+    (with-temp-file (expand-file-name "new.txt" root)
+      (insert (legu-test--lines 20) "\nbelow\n"))
+    (let ((region (car (alist-get 'regions (legu-test--regions "new.txt")))))
+      (should (equal "reviewed" (alist-get 'state region)))
+      (should (= 5 (alist-get 'start region)))
+      (should-not (alist-get 'moved region)))))
+
+(defun legu-test--same-lines (n)
+  "N identical lines: a region shifted to the wrong place still hashes the
+same, so only the diff can put it where it belongs."
+  (apply #'concat (make-list n "same\n")))
+
+(ert-deftest legu-test-integration-records-citing-different-commits-shift-by-their-own ()
+  (legu-test--with-repo (list (cons "a.txt" (legu-test--same-lines 30)))
+    (legu-test--legu "mark" "a.txt:5-8")
+    (with-temp-file (expand-file-name "a.txt" root)
+      (insert "top\n" (legu-test--same-lines 30)))
+    (legu-test--git "commit" "-qam" "one line above")
+    (legu-test--legu "mark" "a.txt:20-25")
+    (with-temp-file (expand-file-name "a.txt" root)
+      (insert "top2\ntop\n" (legu-test--same-lines 30)))
+    (let ((starts (sort (mapcar (lambda (r) (alist-get 'start r))
+                                (alist-get 'regions (legu-test--regions "a.txt")))
+                        #'<)))
+      (should (equal '(7 21) starts)))))
+
+(ert-deftest legu-test-integration-a-quoted-path-keeps-its-hunks-to-itself ()
+  "git quotes a non-ASCII path in a diff header.  Neither file may take
+the other's hunks when one command anchors both."
+  (legu-test--with-repo (list (cons "a.txt" (legu-test--same-lines 30))
+                              (cons "bé.txt" (concat (legu-test--lines 20) "\n")))
+    (legu-test--legu "mark" "a.txt:5-8")
+    (legu-test--legu "mark" "bé.txt:5-10")
+    (with-temp-file (expand-file-name "a.txt" root)
+      (insert "top\n" (legu-test--same-lines 30)))
+    (with-temp-file (expand-file-name "bé.txt" root)
+      (insert "x\ny\nz\n" (legu-test--lines 20) "\n"))
+    (let* ((files (alist-get 'files (legu--parse-json
+                                     (nth 1 (legu-test--legu "status" "--json")))))
+           (ranges (lambda (path)
+                     (alist-get 'ranges (seq-find (lambda (f) (equal path (alist-get 'path f)))
+                                                  files)))))
+      (should (equal "6-9" (funcall ranges "a.txt")))
+      (should (equal "8-13" (funcall ranges "bé.txt"))))))
+
 (ert-deftest legu-test-integration-regions-distinguishes-stale-and-missing ()
   (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 20) "\n"))
                               (cons "gone.txt" "one\ntwo\n"))

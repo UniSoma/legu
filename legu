@@ -413,6 +413,79 @@
                                  "git" "diff" "--no-index" "-U0" "--" (str a) (str b)))))
       (finally (fs/delete-tree dir)))))
 
+;; [commit path] -> hunks, for every file `fetch-hunks!` asked git about. nil
+;; sends `try-anchor` down the per-file route of `diff-hunks`.
+(def ^:private commit-hunks (atom {}))
+
+(defn- diff-by-path
+  "path -> hunks from one `git diff -U0` over many files. Only a file the
+   commit and the working tree both hold as text is kept. A file new since
+   the commit would come back as one hunk of every line where `diff-hunks`
+   has no old text to diff, and a file git's attributes call binary as no
+   hunks where `diff-hunks`, outside the repository, finds some. A path git
+   quotes in the header is left out too, rather than unquoted here."
+  [out]
+  (loop [ls (str/split-lines out) cur nil acc {}]
+    (if-let [l (first ls)]
+      (cond
+        (str/starts-with? l "diff --git ")
+        (let [[_ p] (re-matches #"diff --git a/(.*) b/\1" l)]
+          (recur (rest ls) p (if p (assoc acc p []) acc)))
+
+        (and cur (some #(str/starts-with? l %)
+                       ["new file mode " "deleted file mode " "Binary files "]))
+        (recur (rest ls) nil (dissoc acc cur))
+
+        (and cur (str/starts-with? l "@@ "))
+        (recur (rest ls) cur (update acc cur into (parse-hunks l)))
+
+        :else (recur (rest ls) cur acc))
+      acc)))
+
+(defn- runs-within
+  "`paths` in runs whose lengths sum to at most `budget`, so that none
+   overruns the kernel's limit on a command line."
+  [budget paths]
+  (loop [ps paths run [] n 0 acc []]
+    (if-let [p (first ps)]
+      (let [k (inc (count p))]
+        (if (and (seq run) (> (+ n k) budget))
+          (recur (rest ps) [p] k (conj acc run))
+          (recur (rest ps) (conj run p) (+ n k) acc)))
+      (cond-> acc (seq run) (conj run)))))
+
+(defn- needs-hunks?
+  "Will anchoring `record` at its own path diff it against its commit? Only
+   when git tracks the path and the text there changed since the review."
+  [{:keys [path commit opaque file-hash]}]
+  (and *git?*
+       (not opaque)
+       (re-matches #"[0-9a-f]{7,64}" (str commit))
+       ((tracked-set) path)
+       (let [c (read-worktree path)]
+         (and (= :text (:kind c)) (not= file-hash (:hash c))))))
+
+(defn fetch-hunks!
+  "Diff each file `records` will anchor at its own path against the commit
+   its records cite, one `git diff` per commit, so that no record spawns a
+   process of its own. The pathspec holds only those files, so a mark pays
+   for the records it anchors and no others."
+  [records]
+  (let [wanted (->> records
+                    (filter needs-hunks?)
+                    (map (juxt :commit :path))
+                    distinct
+                    (remove #(contains? @commit-hunks %))
+                    (group-by first))]
+    (doseq [[commit pairs] wanted
+            paths (runs-within 100000 (map second pairs))]
+      (let [by-path (diff-by-path
+                     (or (apply git-ok "--literal-pathspecs" "diff" "-U0" "--no-renames"
+                                "--no-color" "--no-ext-diff" "--no-textconv"
+                                "--src-prefix=a/" "--dst-prefix=b/" commit "--" paths)
+                         ""))]
+        (swap! commit-hunks into (for [p paths] [[commit p] (get by-path p)]))))))
+
 (defn project-range
   "Shift [start end] across hunks. :dirty? when a hunk touched the region itself."
   [hunks start end]
@@ -454,8 +527,9 @@
     {:state :reviewed :path p :start start :end end :moved? (not= p path)}
     (let [new-lines @(:lines cur)
           len (inc (- end start))
-          old-text (read-at-commit commit path)
-          hunks (when old-text (diff-hunks old-text (:text cur)))
+          old-text (delay (read-at-commit commit path))
+          hunks (or (when (= p path) (get @commit-hunks [commit path]))
+                    (when @old-text (diff-hunks @old-text (:text cur))))
           {:keys [offset]} (if hunks (project-range hunks start end) {:offset 0})
           ns* (+ start offset)
           ne (+ end offset)
@@ -469,8 +543,8 @@
         (let [here (occurrences new-lines len content-hash 2)
               unique? (= 1 (count here))
               ;; the old text can only veto a unique match
-              there (when (and old-text unique?)
-                      (occurrences (lines-of old-text) len content-hash 2))]
+              there (when (and unique? @old-text)
+                      (occurrences (lines-of @old-text) len content-hash 2))]
           (if (and unique? (or (nil? there) (<= (count there) 1)))
             {:state :reviewed :path p :start (first here) :end (+ (first here) len -1)
              :moved? true :reason "block moved"}
@@ -507,7 +581,9 @@
         (not ((tracked-set) path)))))
 
 (defn resolve-region
-  "Current state of a stored record against the working tree.
+  "Current state of a stored record against the working tree. A file that
+   changed is diffed through `fetch-hunks!` when a caller ran it over this
+   record first, as `resolve-regions` does, and on its own otherwise.
    => {:state :reviewed|:stale|:missing :path :start :end :moved? :reason}"
   [{:keys [path start end opaque file-hash commit] :as record}]
   (let [at-old (read-worktree path)
@@ -544,6 +620,13 @@
                              :reason "file is unreadable"}
                 {:state :missing :path path :start start :end end
                  :reason "file is gone"}))))))))
+
+(defn resolve-regions
+  "`resolve-region` of each record, in order, with their files diffed a
+   commit at a time first."
+  [records]
+  (fetch-hunks! records)
+  (mapv resolve-region records))
 
 ;; ---------------------------------------------------------------- model
 
@@ -603,14 +686,13 @@
   "path -> {:reviewed [[start end] ...] :stale [[start end] ...]} at current
    locations, one range per record, overlapping as the records do."
   []
-  (reduce (fn [acc r]
-            (let [res (resolve-region r)]
-              (if (= :missing (:state res))
-                acc
-                (update-in acc [(:path res) (:state res)] (fnil conj [])
-                           (if (:start res) [(:start res) (:end res)] [1 1])))))
+  (reduce (fn [acc res]
+            (if (= :missing (:state res))
+              acc
+              (update-in acc [(:path res) (:state res)] (fnil conj [])
+                         (if (:start res) [(:start res) (:end res)] [1 1]))))
           {}
-          (records)))
+          (resolve-regions (records))))
 
 ;; Coverage counts lines through [start end] ranges rather than sets of line
 ;; numbers: twenty overlapping records on each of 10,000 files are millions
@@ -857,8 +939,7 @@
   "Can `sidecar` hold a record an anchoring at `path` makes obsolete? Only its
    own sidecar, and the ones whose file may have become it. Every other sidecar
    answers for a file of its own, and anchoring its records could only put them
-   somewhere other than `path` — at a `git show` and a `git diff --no-index`
-   apiece."
+   somewhere other than `path`, at the cost of diffing every file they cite."
   [path sidecar]
   (or (= sidecar path)
       (and *git?* (may-have-moved? sidecar))))
@@ -870,13 +951,16 @@
    sidecars that cannot hold an obsolete record go unanchored. Every sidecar is
    still read, so a write names the ones legu cannot parse."
   [region kind obsolete?]
-  (doseq [sidecar (stored-paths)
-          :let [state (read-state sidecar)]
-          :when (and state (can-hold-obsolete? (:path region) sidecar))
-          :let [keep? #(not (obsolete? region (assoc % :path sidecar)))
-                pruned (update state kind #(vec (filter keep? %)))]
-          :when (not= state pruned)]
-    (save-state! (assoc pruned :path sidecar))))
+  (let [holders (vec (for [sidecar (stored-paths)
+                           :let [state (read-state sidecar)]
+                           :when (and state (can-hold-obsolete? (:path region) sidecar))]
+                       state))]
+    (fetch-hunks! (for [state holders r (kind state)] (assoc r :path (:path state))))
+    (doseq [{sidecar :path :as state} holders
+            :let [keep? #(not (obsolete? region (assoc % :path sidecar)))
+                  pruned (update state kind #(vec (filter keep? %)))]
+            :when (not= state pruned)]
+      (save-state! (assoc pruned :path sidecar)))))
 
 (defn cmd-mark [{:keys [opts]}]
   (let [{:keys [path start end opaque cur] :as region} (region-of (:target opts))
@@ -925,6 +1009,7 @@
                                  (and (= start (:start r)) (= end (:end r))))))
         dropped (atom 0)]
     (assert-readable! path)
+    (when start (fetch-hunks! (concat (records) (ticket-records))))
     (doseq [sidecar (stored-paths)
             :let [state (read-state sidecar)]
             :when state
@@ -961,15 +1046,14 @@
   "Return readable records that anchor at `path`.
    Reads every sidecar so `emit` can report an incomplete answer."
   [path kind]
-  (vec
-   (for [stored-path (stored-paths)
-         :let [state (read-state stored-path)]
-         record (kind state)
-         :when (record-may-answer-path? path stored-path record)
-         :let [stored (assoc record :path stored-path)
-               current (resolve-region stored)]
-         :when (= path (:path current))]
-     {:stored stored :current current})))
+  (let [candidates (vec (for [stored-path (stored-paths)
+                              :let [state (read-state stored-path)]
+                              record (kind state)
+                              :when (record-may-answer-path? path stored-path record)]
+                          (assoc record :path stored-path)))]
+    (vec (for [[stored current] (map vector candidates (resolve-regions candidates))
+               :when (= path (:path current))]
+           {:stored stored :current current}))))
 
 (defn- original-provenance
   "Where and when a record was made. An opaque record reports null bounds."
@@ -1157,8 +1241,8 @@
                   :unreviewed (reduce + 0 (map :unreviewed all-files))
                   :reviewed (reduce + 0 (map :reviewed all-files))
                   :stale (reduce + 0 (map :stale all-files))}
-        tickets (->> (ticket-records)
-                     (map (fn [t] (assoc (resolve-region t) :ticket (:ticket t))))
+        tickets (->> (let [ts (ticket-records)]
+                       (map (fn [t res] (assoc res :ticket (:ticket t))) ts (resolve-regions ts)))
                      (filter #(under? (:path %) prefix))
                      (sort-by (juxt :path #(or (:start %) 0))))
         data {:coverage coverage
@@ -1177,8 +1261,7 @@
             (render-tickets tickets)))))
 
 (defn cmd-stale [{:keys [opts]}]
-  (let [rs (->> (records)
-                (map resolve-region)
+  (let [rs (->> (resolve-regions (records))
                 (filter #(#{:stale :missing} (:state %)))
                 (sort-by (juxt :path #(or (:start %) 0))))]
     (emit opts {:stale (mapv #(-> (select-keys % [:path :start :end :reason])
