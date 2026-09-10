@@ -6,7 +6,7 @@ type: chore
 priority: 3
 mode: afk
 created: '2026-09-10T21:04:41.236901325Z'
-updated: '2026-09-10T21:04:46.177798798Z'
+updated: '2026-09-10T21:05:49.315700409Z'
 acceptance:
 - title: Prompts, help-echo and cells that name the Reviewed state say reviewed
   done: false
@@ -25,3 +25,9 @@ lgu-01m26gbjmqjc moved the tables, the coverage block and the echo lines onto CO
 - legu-list.el: "Record %d file%s read in full, unopened", "Re-mark %d stale regions read?", the stale row's "read <date>" cell
 
 Where "read" describes what the reader does ("what to read next", "re-read"), it stays.
+
+## Notes
+
+**2026-09-10T21:05:49.315700409Z**
+
+Two more spots: legu-transient.el's menu group titled "Read", and emacs/README.md's lighter description, which calls the percentage the lines "read".
