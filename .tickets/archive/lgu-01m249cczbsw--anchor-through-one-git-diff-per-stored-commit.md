@@ -6,7 +6,7 @@ type: task
 priority: 1
 mode: afk
 created: '2026-09-09T23:52:20.201028689Z'
-updated: '2026-09-10T13:54:55.770374865Z'
+updated: '2026-09-10T14:01:57.317838383Z'
 closed: '2026-09-10T13:54:55.770374865Z'
 acceptance:
 - title: Stale coverage at 10,000 files and 20 records completes under 15 s on the experiment's fixture, three fresh-process trials recorded on the ticket
@@ -29,6 +29,7 @@ links:
 - lgu-01m249cddd06
 external_refs:
 - git:fcc56a18dae995646365cd0fb9bb45db9a9919f2
+- git:38ddb5b51dc6402d246f661f4226fbff0375a380
 ---
 
 ## Description
@@ -109,3 +110,13 @@ Where the committed change (fcc56a1) goes past the description, and what it leav
 **2026-09-10T13:54:55.770374865Z**
 
 Records anchoring at their own tracked path take their hunks from one git diff -U0 --no-renames per stored commit, restricted to the files being anchored, instead of a git show and a git diff --no-index each. Stale coverage at 10,000 files and 20 records runs in 10.1 s, where it took about 14 minutes; mark on the same fixture went from 3.11 s to 2.83 s. coverage, status, stale and both marks hash identically before and after on the four stale fixtures. Three new ERT tests pin a record older than its file, two records citing different commits, and a quoted path beside a plain one.
+
+**2026-09-10T14:01:57.205092161Z**
+
+Clean coverage, which the criteria did not ask about but which the change touches: fetch-hunks! looks at every record on a clean tree too. Same fixture and method as the stale timings, 10,000 files and 20 records, three fresh processes each, load average 2.5 to 3.5.
+
+- before (3d51ca6): 3.82 s median, 3.80 to 3.93 s, peak RSS 350 MB. A second window gave 3.83 s.
+- fcc56a1: 4.13 s median, 4.08 to 4.17 s, peak RSS 388 MB. resolve-regions held all 200,000 results in a vector, and needs-hunks? ran the commit check and the tracked set ahead of the hash.
+- 38ddb5b, which asks the hash first and returns the results lazily: 3.92 s median, 3.91 to 3.97 s, peak RSS 348 MB.
+
+Re-measured with 38ddb5b in the same window: stale coverage 10.06 s median, 9.92 to 10.22 s, peak RSS 437 MB. The stale peak was not measured before, since the old code took about 14 minutes on this cell. mark was 2.82 s median, against 3.04 s before. coverage, status, stale and both marks hash identically to 3d51ca6 on the clean 10,000-file, 20-record fixture and on the stale 10,000- and 5,000-file, 20-record fixtures. Both suites pass: ERT 151 tests with 6 evil tests skipped, and the 36 CLI tests.
