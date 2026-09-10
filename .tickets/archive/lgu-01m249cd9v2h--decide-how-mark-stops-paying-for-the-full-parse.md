@@ -1,17 +1,18 @@
 ---
 id: lgu-01m249cd9v2h
 title: Decide how mark stops paying for the full parse
-status: open
+status: closed
 type: task
 priority: 2
 mode: hitl
 created: '2026-09-09T23:52:20.536743583Z'
-updated: '2026-09-10T14:59:30.493337918Z'
+updated: '2026-09-10T20:23:21.200670363Z'
+closed: '2026-09-10T20:23:21.200670363Z'
 acceptance:
 - title: A note on this ticket records the decision, the measurement it rests on, and the ADR it touches if any
-  done: false
+  done: true
 - title: If a cache outside the store is chosen, an ADR says what it holds, where it lives, and that a missing or stale cache changes no answer
-  done: false
+  done: true
 deps:
 - lgu-01m249cd6dgq
 links:
@@ -24,6 +25,8 @@ links:
 - lgu-01m249cddd06
 - lgu-01m25t7y4zzf
 - lgu-01m25t8643d6
+tags:
+- settled
 ---
 
 ## Description
@@ -49,6 +52,22 @@ since coverage needs every record.
 
 Whichever is chosen, ADR-0010 stands: the CLI is the single owner of the
 store, and nothing outside `.review/` is read as review state.
+
+### Decisions
+
+- The target is the current number, and the 500 ms target is dropped. On
+  JSON Lines schema 3 with the parallel parse (d00fdd7), mark at 10,000
+  files and 20 records takes 1.2 s on one core and 0.83 s on 32.
+- The parse-verdict cache is rejected. It adds a file outside the store and
+  a staleness key to get right, and it would not help `regions`, whose
+  `record-may-answer-path?` (`legu`) needs each record's `:commit`, not a
+  parse verdict.
+- The write's contract stays. `mark`, `ticket` and `forget` still name every
+  unreadable sidecar, and
+  `a-write-names-every-sidecar-it-cannot-read-in-path-order`
+  (`test/cli_test.clj`) stands as written. The narrower contract only paid
+  for a target that is now dropped.
+- No ADR, no code change and no follow-up ticket. No glossary change.
 
 ## Notes
 
@@ -109,3 +128,15 @@ lgu-01m249cd6dgq is the next number.
 lgu-01m249cd6dgq's parallel parse landed (d00fdd7) on JSONL schema 3. mark at 10,000 files and 20 records, three fresh processes, warm page cache, every core of a 32-core i9-13900HX: 1.220, 1.239, 1.244 s before against 0.850, 0.827, 0.810 s after. The after runs spend about 3.7 s of CPU each. The one-core number is the before one, 1.17 to 1.21 s in the note above, since the parse is the only part made parallel.
 
 Both numbers this decision waited on are in: 1.2 s on one core and 0.83 s on 32. Neither meets the 500 ms target, so the format change and the parallel parse together are not enough, and one of the remaining options is still needed: the narrower contract or the parse-verdict cache outside the store.
+
+**2026-09-10T20:23:20.981253107Z**
+
+Decision: mark stays as it is. The 500 ms target is dropped, and the current
+number is accepted: 1.2 s on one core and 0.83 s on 32, at 10,000 files and
+20 records on JSON Lines schema 3 with the parallel parse, from the
+2026-09-10T14:59 note above. No parse-verdict cache is added, and the write
+keeps naming every unreadable sidecar. No ADR is touched; ADR-0010 stands.
+
+**2026-09-10T20:23:21.200670363Z**
+
+Decided to keep mark as it is: the 500 ms target is dropped for the measured 1.2 s on one core and 0.83 s on 32, with no parse-verdict cache and no narrower write contract.

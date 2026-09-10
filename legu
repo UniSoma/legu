@@ -555,18 +555,45 @@
           {:offset 0 :dirty? false}
           hunks))
 
+(defn- window-starts
+  "hash -> ascending 1-based start lines of every window of `len` lines in
+   `trimmed`, whose lines are trimmed already, which leaves `norm-hash`
+   nothing to trim in each of the windows a line falls in."
+  [trimmed len]
+  (if-not (and (pos? len) (<= len (count trimmed)) (<= (count trimmed) 200000))
+    {}
+    (persistent!
+     (reduce (fn [m i]
+               (let [h (norm-hash (subvec trimmed i (+ i len)))]
+                 (assoc! m h (conj (get m h []) (inc i)))))
+             (transient {})
+             (range (inc (- (count trimmed) len)))))))
+
+;; [lines trimmed {len index}] for the file `file-windows` indexed last.
+(def ^:private last-windows (atom nil))
+
+(defn- file-windows
+  "`window-starts` of a file's current `lines`, kept for the file asked about
+   last. A file's records are anchored one after another, so between them
+   they trim its lines once and hash its windows once per length, where
+   keeping every file's would hold each stale file's index for the rest of
+   the run."
+  [lines len]
+  (let [[indexed trimmed by-len] @last-windows
+        [trimmed by-len] (if (identical? indexed lines)
+                           [trimmed by-len]
+                           [(mapv str/trim lines) {}])]
+    (or (get by-len len)
+        (let [index (window-starts trimmed len)]
+          (reset! last-windows [lines trimmed (assoc by-len len index)])
+          index))))
+
 (defn occurrences
-  "1-based start lines of every window of `len` lines hashing to `want`. Stops
-   after `cap` hits — callers only need to know whether the match is unique."
-  [lines len want cap]
-  (if-not (and (pos? len) (<= len (count lines)) (<= (count lines) 200000))
-    []
-    (let [last-i (- (count lines) len)]
-      (loop [i 0 hits []]
-        (cond
-          (or (> i last-i) (>= (count hits) cap)) hits
-          (= want (norm-hash (subvec lines i (+ i len)))) (recur (inc i) (conj hits (inc i)))
-          :else (recur (inc i) hits))))))
+  "The first `cap` 1-based start lines in `index`, a `window-starts`, of the
+   windows hashing to `want`. Callers only need to know whether the match
+   is unique."
+  [index want cap]
+  (vec (take cap (get index want))))
 
 (defn try-anchor
   "Locate a record's reviewed content inside file `p`, whose content is `cur`.
@@ -590,11 +617,12 @@
         ;; The region did not land where the diff said. Look for the block
         ;; elsewhere in the file — but only trust an unambiguous match: a block
         ;; that already had a twin at review time proves nothing about a move.
-        (let [here (occurrences new-lines len content-hash 2)
+        (let [here (occurrences (file-windows new-lines len) content-hash 2)
               unique? (= 1 (count here))
               ;; the old text can only veto a unique match
               there (when (and unique? @old-text)
-                      (occurrences (lines-of @old-text) len content-hash 2))]
+                      (occurrences (window-starts (mapv str/trim (lines-of @old-text)) len)
+                                   content-hash 2))]
           (if (and unique? (or (nil? there) (<= (count there) 1)))
             {:state :reviewed :path p :start (first here) :end (+ (first here) len -1)
              :moved? true :reason "block moved"}

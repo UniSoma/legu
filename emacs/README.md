@@ -289,7 +289,7 @@ the mark it produced.
 emacs -Q --batch -L . -l legu-tests.el -f ert-run-tests-batch-and-exit
 ```
 
-151 tests. The pure half covers range arithmetic, the sidecar reader, the derived
+154 tests. The pure half covers range arithmetic, the sidecar reader, the derived
 coverage numbers, the dired column's sums and formatting, painting
 precedence and the overlay lifecycle. The other
 half drives the real `legu` binary against real scratch git repositories —

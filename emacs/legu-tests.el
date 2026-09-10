@@ -1155,6 +1155,55 @@ the other's hunks when one command anchors both."
       (should (equal "6-9" (funcall ranges "a.txt")))
       (should (equal "8-13" (funcall ranges "bé.txt"))))))
 
+(defun legu-test--numbered (from to)
+  "Lines FROM to TO of `legu-test--lines', each ending in a newline."
+  (mapconcat (lambda (i) (format "line %d\n" i)) (number-sequence from to) ""))
+
+(ert-deftest legu-test-integration-a-region-cut-and-pasted-within-its-file-is-moved ()
+  "Cut from lines 5-10 and pasted at the end: the diff says the region was
+deleted, so only the search for its content finds it."
+  (legu-test--with-repo (list (cons "a.txt" (legu-test--numbered 1 30)))
+    (legu-test--legu "mark" "a.txt:5-10")
+    (with-temp-file (expand-file-name "a.txt" root)
+      (insert (legu-test--numbered 1 4) (legu-test--numbered 11 30)
+              (legu-test--numbered 5 10)))
+    (let ((region (car (alist-get 'regions (legu-test--regions "a.txt")))))
+      (should (equal "reviewed" (alist-get 'state region)))
+      (should (= 25 (alist-get 'start region)))
+      (should (= 30 (alist-get 'end region)))
+      (should (eq t (alist-get 'moved region)))
+      (should (equal "block moved" (alist-get 'reason region))))))
+
+(ert-deftest legu-test-integration-a-region-found-twice-now-is-stale ()
+  (legu-test--with-repo (list (cons "a.txt" (legu-test--numbered 1 30)))
+    (legu-test--legu "mark" "a.txt:5-10")
+    (with-temp-file (expand-file-name "a.txt" root)
+      (insert (legu-test--numbered 1 4) (legu-test--numbered 11 30)
+              (legu-test--numbered 5 10) (legu-test--numbered 5 10)))
+    (let ((region (car (alist-get 'regions (legu-test--regions "a.txt")))))
+      (should (equal "stale" (alist-get 'state region)))
+      (should (= 5 (alist-get 'start region)))
+      (should (= 10 (alist-get 'end region))))))
+
+(ert-deftest legu-test-integration-a-region-with-a-twin-at-review-time-is-stale ()
+  "The region is rewritten and its twin survives.  The file now holds the
+reviewed content once, but it held it twice when reviewed, so the twin is
+no evidence that the region moved."
+  (let ((block "block 1\nblock 2\nblock 3\nblock 4\nblock 5\nblock 6\n"))
+    (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--numbered 1 4) block
+                                                      (legu-test--numbered 11 19) block
+                                                      (legu-test--numbered 26 30))))
+      (legu-test--legu "mark" "a.txt:5-10")
+      (with-temp-file (expand-file-name "a.txt" root)
+        (insert (legu-test--numbered 1 4)
+                "block 1\nblock 2\nchanged\nblock 4\nblock 5\nblock 6\n"
+                (legu-test--numbered 11 19) block (legu-test--numbered 26 30)))
+      (let ((region (car (alist-get 'regions (legu-test--regions "a.txt")))))
+        (should (equal "stale" (alist-get 'state region)))
+        (should (= 5 (alist-get 'start region)))
+        (should (= 10 (alist-get 'end region)))
+        (should (equal "content changed" (alist-get 'reason region)))))))
+
 (ert-deftest legu-test-integration-regions-distinguishes-stale-and-missing ()
   (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 20) "\n"))
                               (cons "gone.txt" "one\ntwo\n"))
