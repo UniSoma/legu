@@ -456,14 +456,15 @@
 
 (defn- needs-hunks?
   "Will anchoring `record` at its own path diff it against its commit? Only
-   when git tracks the path and the text there changed since the review."
+   when the text there changed since the review and git tracks the path.
+   The hash is asked first: on a clean tree it answers for every record."
   [{:keys [path commit opaque file-hash]}]
   (and *git?*
        (not opaque)
-       (re-matches #"[0-9a-f]{7,64}" (str commit))
-       ((tracked-set) path)
        (let [c (read-worktree path)]
-         (and (= :text (:kind c)) (not= file-hash (:hash c))))))
+         (and (= :text (:kind c)) (not= file-hash (:hash c))))
+       ((tracked-set) path)
+       (re-matches #"[0-9a-f]{7,64}" (str commit))))
 
 (defn fetch-hunks!
   "Diff each file `records` will anchor at its own path against the commit
@@ -623,10 +624,11 @@
 
 (defn resolve-regions
   "`resolve-region` of each record, in order, with their files diffed a
-   commit at a time first."
+   commit at a time first. Lazy, so a caller that folds the results never
+   holds all of them at once."
   [records]
   (fetch-hunks! records)
-  (mapv resolve-region records))
+  (map resolve-region records))
 
 ;; ---------------------------------------------------------------- model
 
