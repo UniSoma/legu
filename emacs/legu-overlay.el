@@ -9,7 +9,7 @@
 ;; the background is reserved for the alarm.  Reviewed code is the eventual
 ;; normal state of a well read file, so tinting it would mean tinting almost
 ;; everything and fighting font-lock for hours.  Absence is the signal for
-;; unread: a file nobody has read looks exactly like a file without the mode.
+;; unreviewed: a file nobody has read looks exactly like a file without the mode.
 ;;
 ;; Overlays, never text properties: text properties travel with
 ;; `kill-region' and `yank', so cutting a reviewed block and pasting it
@@ -286,8 +286,8 @@ ten thousand line file one line at a time is otherwise quadratic."
           (overlay-put ov 'before-string indicator))
         (overlay-put ov 'help-echo
                      (pcase state
-                       ('reviewed "legu: read")
-                       ('stale "legu: read, but the content has changed")
+                       ('reviewed "legu: reviewed")
+                       ('stale "legu: stale — the content has changed since it was reviewed")
                        ('ticket "legu: ticket anchored here")
                        ('unverified "legu: unverified — the file on disk has moved on")
                        ('frontier "legu: reading frontier")

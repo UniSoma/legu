@@ -96,7 +96,7 @@ With a prefix argument EDIFF, run `ediff' against that commit instead."
                 legu-diff--source (list :buffer source :path path
                                         :start start :end end :commit commit))
           (setq header-line-format
-                (list (format " %s  %s:%d-%d   read %s by %s at %s"
+                (list (format " %s  %s:%d-%d   reviewed %s by %s at %s"
                               (propertize state 'face
                                           (pcase state
                                             ("stale" 'legu-stale)

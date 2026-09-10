@@ -720,7 +720,7 @@ differently from \"src/\" and \"src-x/\"."
     (if d (directory-file-name d) "")))
 
 (defun legu--queue (rows limit)
-  "The reading queue: LIMIT rows of ROWS with unread or stale lines.
+  "The reading queue: LIMIT rows of ROWS with unreviewed or stale lines.
 Ordering reproduces the CLI's `next' exactly."
   (let (gaps)
     (maphash (lambda (path row)
@@ -1283,7 +1283,7 @@ and the diff buffer name a region without faking a selection."
 
 ;;;###autoload
 (defun legu-mark (&optional arg)
-  "Mark a region of this file read.
+  "Mark a region of this file reviewed.
 
 With no active region, marks from the reading frontier down to point --
 everything you have just read.  With a region, marks that region.  With
@@ -1305,7 +1305,7 @@ everything you have just read.  With a region, marks that region.  With
          (span (and region (1+ (- (cdr region) (car region))))))
     (when (and span (not (legu--selection-p)) (not (equal arg '(16)))
                (> span legu-frontier-max)
-               (not (y-or-n-p (format "Mark %d lines (%d-%d) read? "
+               (not (y-or-n-p (format "Mark %d lines (%d-%d) reviewed? "
                                       span (car region) (cdr region)))))
       (user-error "legu: cancelled"))
     (let* ((root legu--root)
@@ -1353,7 +1353,7 @@ everything you have just read.  With a region, marks that region.  With
                (legu--repaint)))))))))
 
 (defun legu-mark-file ()
-  "Mark this whole file read."
+  "Mark this whole file reviewed."
   (interactive)
   (legu-mark '(4)))
 
@@ -1421,7 +1421,7 @@ The record is recoverable from git: `.review/' is committed."
            (message "%s" (propertize (string-trim stderr) 'face 'warning))))))))
 
 (defun legu--gaps ()
-  "Ranges of this buffer that are unread or stale."
+  "Ranges of this buffer that are unreviewed or stale."
   (let* ((state legu--painted)
          (total (or (plist-get state :total) (legu--buffer-lines))))
     (legu--ranges-union
@@ -1448,12 +1448,12 @@ WHAT names the thing for the error message."
       (message "legu: line %d" target))))
 
 (defun legu-next-gap ()
-  "Move to the next unread or stale line in this buffer."
+  "Move to the next unreviewed or stale line in this buffer."
   (interactive)
   (legu--goto-range (legu--gaps) t "gap"))
 
 (defun legu-previous-gap ()
-  "Move to the previous unread or stale line in this buffer."
+  "Move to the previous unreviewed or stale line in this buffer."
   (interactive)
   (legu--goto-range (legu--gaps) nil "gap"))
 

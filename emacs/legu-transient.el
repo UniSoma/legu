@@ -46,7 +46,7 @@
   "Review coverage for this repository."
   :refresh-suffixes t
   [:description legu-transient--heading
-   ["Read"
+   ["Mark"
     ("r" "mark to point" legu-mark)
     ("R" "mark whole file" legu-mark-file)
     ("SPC" "set frontier" legu-set-frontier)]

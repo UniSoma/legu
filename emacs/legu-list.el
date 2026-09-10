@@ -393,7 +393,7 @@ the right of them fall off the window.  Anchors past it are elided."
             (let* ((path (car row)) (e (cdr row))
                    (state (nth 3 e))
                    (record (legu-list--record path (or (nth 0 e) 1)))
-                   (when-read (and record (alist-get 'timestamp record))))
+                   (when-reviewed (and record (alist-get 'timestamp record))))
               (legu-list--row
                path (nth 0 e) (nth 1 e) 'stale
                (concat
@@ -401,7 +401,7 @@ the right of them fall off the window.  Anchors past it are elided."
                                  (if (equal state "missing") 'legu-missing 'legu-stale))
                 (format " %-18s " (or (nth 2 e) ""))
                 (legu-list--face
-                 (if when-read (format "read %s" (substring when-read 0 10)) "")
+                 (if when-reviewed (format "reviewed %s" (substring when-reviewed 0 10)) "")
                  'legu-list-count))))))))
     (length rows)))
 
@@ -438,7 +438,7 @@ the right of them fall off the window.  Anchors past it are elided."
     (length rows)))
 
 (defun legu-list--files-with-gaps (snapshot)
-  "How many files in SNAPSHOT still have unread or stale lines, or nil.
+  "How many files in SNAPSHOT still have unreviewed or stale lines, or nil.
 The queue shows at most `legu-next-limit' of them."
   (when-let* ((rows (plist-get snapshot :rows)))
     (let ((n 0))
@@ -513,10 +513,10 @@ With OTHER-WINDOW, in another window."
       (funcall fn row))))
 
 (defun legu-list-mark ()
-  "Mark the row at point read, or every row the region touches.
+  "Mark the row at point reviewed, or every row the region touches.
 A stale row re-marks exactly its own range.  A queue row is a file with
-unread lines in it, so recording it read is a claim about code nobody has
-opened -- that one is always confirmed by name."
+unreviewed lines in it, so recording it reviewed is a claim about code
+nobody has opened -- that one is always confirmed by name."
   (interactive)
   (let* ((rows (legu-list--rows-in-region))
          (whole (seq-remove (lambda (r) (eq (plist-get r :kind) 'stale)) rows)))
@@ -524,7 +524,7 @@ opened -- that one is always confirmed by name."
     (cond
      (whole
       (unless (yes-or-no-p
-               (format "Record %d file%s read in full, unopened (%s%s)%s? "
+               (format "Record %d file%s fully reviewed, unopened (%s%s)%s? "
                        (length whole) (if (= 1 (length whole)) "" "s")
                        (mapconcat (lambda (r) (plist-get r :path))
                                   (seq-take whole 3) ", ")
@@ -538,7 +538,7 @@ opened -- that one is always confirmed by name."
                            ""))))
         (user-error "legu: cancelled")))
      ((> (length rows) 1)
-      (unless (y-or-n-p (format "Re-mark %d stale regions read? " (length rows)))
+      (unless (y-or-n-p (format "Re-mark %d stale regions reviewed? " (length rows)))
         (user-error "legu: cancelled"))))
     (dolist (row rows)
       (legu-list--in-source

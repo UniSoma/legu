@@ -265,6 +265,19 @@ parse is not skipped, since the lines a merge conflict wraps are records."
       ;; Exactly one overlay per line: 3 is the ticket, 4 and 5 reviewed.
       (should (= 3 (length states))))))
 
+(ert-deftest legu-test-help-echo-names-the-state ()
+  ;; lgu-01m26j64rmqk: the help-echo called the Reviewed state "read".
+  (legu-test--with-buffer 20
+    (legu-overlay-paint :reviewed '((3 . 5)) :stale '((10 . 11)))
+    (let ((echoes (mapcar (lambda (o) (cons (overlay-get o 'legu-state)
+                                            (overlay-get o 'help-echo)))
+                          (legu-test--legu-overlays))))
+      (should (equal "legu: reviewed" (alist-get 'reviewed echoes)))
+      (should (equal "legu: stale — the content has changed since it was reviewed"
+                     (alist-get 'stale echoes)))
+      (dolist (echo echoes)
+        (should-not (string-match-p "\\bread\\b" (cdr echo)))))))
+
 (ert-deftest legu-test-unverified-drops-the-alarm-background ()
   (legu-test--with-buffer 20
     (legu-overlay-paint :stale '((3 . 4)) :unverified t)
@@ -975,7 +988,7 @@ record counts only where no reviewed one covers it, and the ranges
                         (alist-get 'files data)))
            (errors (alist-get 'errors data)))
       (should (= 5 (alist-get 'reviewed a)))
-      ;; Its state is unknown, so it is left out rather than called unread --
+      ;; Its state is unknown, so it is left out rather than called unreviewed --
       ;; otherwise `next' sends the reviewer back to a file already marked.
       (should-not (seq-find (lambda (f) (equal "b.txt" (alist-get 'path f)))
                             (alist-get 'files data)))

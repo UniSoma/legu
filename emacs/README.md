@@ -88,8 +88,8 @@ A fully unreviewed file looks exactly like a file without the mode, which is the
 right visual cost for the buffers you open to grep something.
 
 The mode line shows repo-wide percent reviewed and this buffer's stale count:
-` legu 61%▪3`. The percent is floored, so it never claims a line you have not
-read. A trailing `?` means legu cannot currently vouch for what is drawn; `!`
+` legu 61%▪3`. The percent is floored, so it never rounds an unreviewed line up
+to reviewed. A trailing `?` means legu cannot currently vouch for what is drawn; `!`
 means the store is unreadable; `—` means the file is outside the eligible set.
 
 ## The dired column
@@ -127,7 +127,7 @@ numbers, not a score. `legu-dired-column` set to nil turns it off.
 ## How it stays fast, and honest
 
 Four tiers, with one rule binding them: **local computation may confirm
-"read, in place"; it may never pronounce "stale", "moved" or "missing".**
+"reviewed, in place"; it may never pronounce "stale", "moved" or "missing".**
 Those verdicts come only from the CLI.
 
 `legu-describe-region` runs `legu regions` for the saved file. It reports every
@@ -289,7 +289,7 @@ the mark it produced.
 emacs -Q --batch -L . -l legu-tests.el -f ert-run-tests-batch-and-exit
 ```
 
-156 tests. The pure half covers range arithmetic, the sidecar reader, the derived
+157 tests. The pure half covers range arithmetic, the sidecar reader, the derived
 coverage numbers, the dired column's sums and formatting, painting
 precedence and the overlay lifecycle. The other
 half drives the real `legu` binary against real scratch git repositories —
