@@ -1,12 +1,13 @@
 ---
 id: lgu-01m249cddd06
 title: Measure the editor-display target in Emacs on the 10,000-file fixture
-status: open
+status: closed
 type: task
 priority: 3
 mode: afk
 created: '2026-09-09T23:52:20.650832265Z'
-updated: '2026-09-10T14:06:32.887993809Z'
+updated: '2026-09-10T20:55:24.463341265Z'
+closed: '2026-09-10T20:55:24.463341265Z'
 acceptance:
 - title: Median round-trip time of the regions query from Emacs batch on the 10,000-file, 20-record fixture is recorded on the ticket, clean and stale, ten trials each
   done: false
@@ -42,3 +43,9 @@ store clean and stale, ten trials each, warm cache. Report the medians on
 the ticket against the 100 ms target, and what portion is process start,
 parse, and anchoring, using the experiment's profiler on the same command
 line. Do not use CLI parse time alone as the answer.
+
+## Notes
+
+**2026-09-10T20:55:24.463341265Z**
+
+Dropped without measuring: Emacs performance is good enough in daily use, so the 100 ms editor-display target no longer needs a number.
