@@ -6,7 +6,7 @@ type: feature
 priority: 2
 mode: afk
 created: '2026-09-11T17:55:41.318535816Z'
-updated: '2026-09-11T19:37:30.294233428Z'
+updated: '2026-09-11T19:37:30.445661385Z'
 closed: '2026-09-11T19:37:30.294233428Z'
 parent: lgu-01m28sh82tk1
 tags:
@@ -27,6 +27,8 @@ acceptance:
   done: true
 deps:
 - lgu-01m28srsgket
+external_refs:
+- git:02e9cfc
 ---
 
 ## Description
