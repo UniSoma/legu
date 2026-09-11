@@ -90,8 +90,8 @@ _Avoid_: duplicate, stray, orphan
 ### Coverage
 
 **Eligible file**:
-A tracked file not excluded by `.reviewignore`. Only lines of eligible files
-count.
+A tracked file not excluded by the store's ignore list. Only lines of eligible
+files count.
 _Avoid_: in scope, included, countable
 
 **Coverage**:
@@ -105,13 +105,43 @@ _Avoid_: progress, completion, score
 ### Storage
 
 **Store**:
-The `.review/` directory at the repo root, committed alongside the code.
+The `.review/` directory at the repo root, committed alongside the code. It
+holds everything legu owns: the sidecars, the ignore list and the signers list.
 _Avoid_: database, index, cache
 
 **Sidecar**:
 One file in the store, holding the review records and ticket references of one
-source file. The store mirrors the source tree, one sidecar per file.
+source file. The sidecars mirror the source tree, one per file.
 _Avoid_: state file, metadata file
+
+### Signing
+
+**Signature**:
+The cryptographic proof carried by a review record that its signer produced
+it and that no field of it has changed since. Ticket references carry none.
+_Avoid_: sign-off, seal, stamp
+
+**Signer**:
+The key that produced a signature. A person may sign with several keys; a key
+belongs to exactly one reviewer.
+_Avoid_: author, identity, owner
+
+**Signers list**:
+The committed bindings of signer to reviewer that a store trusts. Its presence
+is what makes a store signed: every mark in a signed store must be signed by a
+listed signer.
+_Avoid_: keyring, allowed signers, trust store
+
+**Signed store**:
+A store with a signers list. In a signed store every review record carries a
+signature; in an unsigned store none does.
+_Avoid_: secure store, verified store
+
+**Verify**:
+To check every review record's signature against the signers list and report
+the ones that fail. Verification is a report on the store, never a change to
+it, and reading commands trust the store without it.
+_Avoid_: validate, audit, check
 
 ### Reading loop
 
