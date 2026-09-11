@@ -76,7 +76,8 @@ putting it before its own; an option legu does not have at all is a third. `legu
 status --limit 3` answers `status does not take --limit`, where legu used to
 accept the line and ignore the flag:
 
-- `mark --reviewer <name>` — defaults to `git config user.name`
+- `mark --reviewer <name>` — defaults to `git config user.name`; refused in a
+  signed store, which takes the name from `.review/signers`
 - `next --limit <n>` — how many files `next` suggests
 - `next --order <dir|cochange>` — which question `next` answers (below)
 - `status --gaps` — `status` lists only files with something left to read
@@ -93,12 +94,12 @@ appear anywhere on the line:
 
 ```
 $ legu --version
-legu 0.5.0 (store schema 3)
+legu 0.5.0 (store schema 4)
 
 $ legu --version --json
 {
   "version" : "0.5.0",
-  "schema" : 3
+  "schema" : 4
 }
 ```
 
@@ -275,7 +276,7 @@ the ignore list at `.review/ignore` and the signers list at `.review/signers`
 Source files are never modified.
 
 ```jsonl
-{"schema":3}
+{"schema":4}
 {"start":40,"end":95,"reviewer":"jonas","timestamp":"2026-08-28T01:00:00Z","commit":"a1b2c3…","file-hash":"…","content-hash":"…"}
 {"start":52,"end":52,"ticket":"lgu-01k7","timestamp":"2026-08-28T01:00:00Z","commit":"a1b2c3…","file-hash":"…","content-hash":"…"}
 ```
@@ -284,19 +285,20 @@ The first line is the header; every line after it is one record, so git shows
 a mark, a supersede or a forget as one changed line and nothing else. A line
 with a `reviewer` is a review record and a line with a `ticket` is a ticket
 reference. Keys come in a fixed order with no whitespace: the region, then who
-and when, then the commit and the two full hashes, so what you scan sits at the
-front of the line and the hashes are a tail the eye skips. Review records come
-first, then ticket references, each sorted by region with ties broken by their
-remaining fields, so the same state is always the same bytes and two people
-editing different records merge cleanly while two edits to the same record are
-a conflict git shows you. Timestamps are whole seconds. The source path is not
-stored: the sidecar's own location says it. An opaque record has no line range
-and no content hash, only `"opaque":true` and the file hash. A sidecar with
-nothing left in it is removed. Sidecars of any other schema are refused, not
-migrated ([ADR-0015](docs/adr/0015-jsonl-sidecars-one-record-per-line.md)).
-The committed `.gitattributes` marks `.review/sidecars/**` as generated, which
-collapses sidecars in GitHub and GitLab review views. Files at the store's root,
-such as the ignore list and the signers list, show in full.
+and when, then the commit and the two full hashes, and in a signed store the
+signature last, so what you scan sits at the front of the line and the hashes
+are a tail the eye skips. Review records come first, then ticket references,
+each sorted by region with ties broken by their remaining fields, so the same
+state is always the same bytes and two people editing different records merge
+cleanly while two edits to the same record are a conflict git shows you.
+Timestamps are whole seconds. The source path is not stored: the sidecar's own
+location says it. An opaque record has no line range and no content hash, only
+`"opaque":true` and the file hash. A sidecar with nothing left in it is
+removed. Sidecars of any other schema are refused, not migrated
+([ADR-0015](docs/adr/0015-jsonl-sidecars-one-record-per-line.md)). The
+committed `.gitattributes` marks `.review/sidecars/**` as generated, which
+collapses sidecars in GitHub and GitLab review views. Files at the store's
+root, such as the ignore list and the signers list, show in full.
 
 legu skips a sidecar it cannot parse — most often one with a merge conflict
 left in it — instead of dying on it. One line that does not parse makes the
@@ -356,9 +358,6 @@ git add .review/signers && git commit -m "Sign reviews"
 A reviewer who cannot push to the repository runs `legu key show` and hands the
 line it prints to someone who can.
 
-`mark` does not sign records yet. Until it does, a signers list changes nothing
-that any command does.
-
 ### Keys
 
 `legu key init` writes two files to `$XDG_CONFIG_HOME/legu/`, or to
@@ -404,6 +403,44 @@ legu skips blank lines and lines that start with `#`. A key appears at most
 once. A name can appear on several lines, one for each machine its reviewer
 signs from. The list is committed and shows in full in review views, so a change
 to who may sign is a diff to one file.
+
+### Signed review records
+
+In a signed store, `legu mark` signs every review record it writes. Before it
+writes anything, it checks that it can:
+
+- `mark` needs a local key. When `key` or `key.pub` is missing, it fails and
+  names `legu key init`.
+- The signers list must have the key in `key.pub`. When it does not, `mark`
+  fails and names `legu key add`.
+- `mark` takes the reviewer name from the key's line in the signers list, so it
+  does not need `git config user.name`. It refuses `--reviewer`, because a
+  record under any other name would fail verification.
+
+The signature is Ed25519 over the UTF-8 bytes of the line `legu-review-record`,
+one newline, and then the record's line exactly as the sidecar stores it,
+without the `signature` key. No newline follows the record line. For the review
+record in the Storage example, the signed bytes are:
+
+```
+legu-review-record
+{"start":40,"end":95,"reviewer":"jonas","timestamp":"2026-08-28T01:00:00Z","commit":"a1b2c3…","file-hash":"…","content-hash":"…"}
+```
+
+The domain line keeps a signature over a legu record from passing as a
+signature over anything else. The sidecar stores the 64 signature bytes in
+base64 under `signature`, the last key on the line, so a mark is still a
+one-line change:
+
+```jsonl
+{"start":40,"end":95,"reviewer":"jonas",…,"content-hash":"…","signature":"…"}
+```
+
+Any change to the record line, its key order included, breaks the signature, so
+a change to the line's layout is a change to the sidecar schema. `forget` and a
+superseding `mark` remove whole records, and the records they leave keep their
+signatures. Ticket references carry no signature, so `legu ticket` needs no key.
+In an unsigned store, `mark` reads no key and writes no signature.
 
 ## Ticket references, not prose
 

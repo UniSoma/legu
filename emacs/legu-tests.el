@@ -95,7 +95,7 @@
 ;;;; The sidecar reader
 
 (defconst legu-test--sidecar "\
-{\"schema\":3}
+{\"schema\":4}
 {\"start\":10,\"end\":20,\"reviewer\":\"a \\\"quoted\\\" name\",\"timestamp\":\"2026-08-28T10:00:28Z\",\"commit\":\"c439a98805096d822fb420ffa3a37564ad124f58\",\"file-hash\":\"be9c2c9ae93d3e3f9279aed5036406b927bac3257ea456970903bb0bcf9c65f9\",\"content-hash\":\"d65c7b\"}
 {\"opaque\":true,\"ticket\":\"lgu-01k7\",\"timestamp\":\"2026-08-28T10:00:28Z\",\"commit\":\"c439a98805096d822fb420ffa3a37564ad124f58\",\"file-hash\":\"be9c2c\"}
 ")
@@ -104,7 +104,7 @@
   (let* ((data (legu--read-sidecar legu-test--sidecar))
          (region (car (alist-get 'regions data)))
          (ticket (car (alist-get 'tickets data))))
-    (should (eql 3 (alist-get 'schema data)))
+    (should (eql 4 (alist-get 'schema data)))
     (should-not (assq 'path data))
     (should (= 1 (length (alist-get 'regions data))))
     (should (= 1 (length (alist-get 'tickets data))))
@@ -117,20 +117,20 @@
 
 (ert-deftest legu-test-sidecar-reads-the-escapes-json-prints ()
   (let ((data (legu--read-sidecar
-               "{\"schema\":3}\n{\"reviewer\":\"a\\fb\\bc\\td\\u00e9\\\\\"}\n")))
+               "{\"schema\":4}\n{\"reviewer\":\"a\\fb\\bc\\td\\u00e9\\\\\"}\n")))
     (should (equal (alist-get 'reviewer (car (alist-get 'regions data)))
                    "a\fb\bc\tdé\\"))))
 
 (ert-deftest legu-test-sidecar-never-signals ()
   "Anything that is not a whole sidecar reads as nil: a line that does not
 parse is not skipped, since the lines a merge conflict wraps are records."
-  (dolist (bad (list "<<<<<<< HEAD\n{\"schema\":3}\n=======\n"
-                     "{\"schema\":3}\n{\"start\":1,\"end\":2,\"reviewer\""
-                     "{\"schema\":3}\n[1,2,3]\n"
-                     "{\"schema\":3}\n\n{\"start\":1,\"end\":2,\"reviewer\":\"r\"}\n"
-                     "{\"schema\":3}\n{\"start\":1,\"end\":2,\"reviewer\":\"r\"} {\"x\":1}\n"
-                     "{\"schema\":3}\n{\"start\":1,\"end\":2,\"reviewer\":\"r\"}garbage\n"
-                     "{\"schema\":3}\n{\"start\":1,\"end\":2,\"file-hash\":\"a\"}\n"
+  (dolist (bad (list "<<<<<<< HEAD\n{\"schema\":4}\n=======\n"
+                     "{\"schema\":4}\n{\"start\":1,\"end\":2,\"reviewer\""
+                     "{\"schema\":4}\n[1,2,3]\n"
+                     "{\"schema\":4}\n\n{\"start\":1,\"end\":2,\"reviewer\":\"r\"}\n"
+                     "{\"schema\":4}\n{\"start\":1,\"end\":2,\"reviewer\":\"r\"} {\"x\":1}\n"
+                     "{\"schema\":4}\n{\"start\":1,\"end\":2,\"reviewer\":\"r\"}garbage\n"
+                     "{\"schema\":4}\n{\"start\":1,\"end\":2,\"file-hash\":\"a\"}\n"
                      "{\"start\":1,\"end\":2,\"reviewer\":\"r\"}\n"
                      "[1,2,3]"
                      "3"
@@ -144,9 +144,10 @@ parse is not skipped, since the lines a merge conflict wraps are records."
     (unwind-protect
         (progn
           (make-directory (file-name-directory side) t)
-          (with-temp-file side (insert "{\"schema\":4}\n"))
-          (let ((legu--schema-warned nil))
-            (should-not (plist-get (legu-sidecar-records dir "a.txt") :ok)))
+          (dolist (other '(3 5))
+            (with-temp-file side (insert (format "{\"schema\":%d}\n" other)))
+            (let ((legu--schema-warned nil))
+              (should-not (plist-get (legu-sidecar-records dir "a.txt") :ok))))
           (with-temp-file side (insert legu-test--sidecar))
           (should (plist-get (legu-sidecar-records dir "a.txt") :ok))
           (should (= 1 (length (plist-get (legu-sidecar-records dir "a.txt") :regions)))))
@@ -964,7 +965,7 @@ record counts only where no reviewed one covers it, and the ranges
 (defun legu-test--break-sidecar (root path)
   "Overwrite PATH's sidecar under ROOT with an unmerged conflict."
   (with-temp-file (expand-file-name (concat ".review/sidecars/" path ".jsonl") root)
-    (insert "<<<<<<< HEAD\n{\"schema\":3}\n=======\nnonsense\n>>>>>>> other\n")))
+    (insert "<<<<<<< HEAD\n{\"schema\":4}\n=======\nnonsense\n>>>>>>> other\n")))
 
 (ert-deftest legu-test-integration-one-broken-sidecar-does-not-down-the-cli ()
   (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 10) "\n"))
@@ -1588,13 +1589,13 @@ git, the CLI or `legu-mode'."
     (let ((sidecar (expand-file-name ".review/sidecars/b.txt.jsonl" root)))
       (make-directory (file-name-directory sidecar) t)
       (with-temp-file sidecar
-        (insert (format "{\"schema\":3}\n{\"start\":1,\"end\":10,\"reviewer\":\"r\",\"file-hash\":\"%s\"}\n"
+        (insert (format "{\"schema\":4}\n{\"start\":1,\"end\":10,\"reviewer\":\"r\",\"file-hash\":\"%s\"}\n"
                         (legu--file-hash file))))
       (legu--compute)
       (should-not legu--file-regions-wanted)
       ;; Break one hash and the file is no longer accounted for locally.
       (with-temp-file sidecar
-        (insert "{\"schema\":3}\n{\"start\":1,\"end\":10,\"reviewer\":\"r\",\"file-hash\":\"deadbeef\"}\n"))
+        (insert "{\"schema\":4}\n{\"start\":1,\"end\":10,\"reviewer\":\"r\",\"file-hash\":\"deadbeef\"}\n"))
       (legu--compute)
       (should legu--file-regions-wanted))))
 
@@ -1879,7 +1880,7 @@ The record then anchors, stale, at 11-21."
     (let ((sidecar (legu-sidecar-file root "a.txt")))
       (make-directory (file-name-directory sidecar) t)
       (with-temp-file sidecar
-        (insert "{\"schema\":2}\n")))
+        (insert "{\"schema\":3}\n")))
     (let ((result (legu-test--legu "status" "--json")))
       (should (= 0 (nth 0 result)))
       (should (string-match-p "cannot read" (nth 2 result)))
@@ -1914,7 +1915,7 @@ The timestamp, commit and hashes default to any well-formed value."
 
 (defun legu-test--sidecar-regexp (regions tickets)
   "A regexp for a whole sidecar holding REGIONS and TICKETS record regexps."
-  (concat "\\`{\"schema\":3}\n" (apply #'concat regions) (apply #'concat tickets) "\\'"))
+  (concat "\\`{\"schema\":4}\n" (apply #'concat regions) (apply #'concat tickets) "\\'"))
 
 (defun legu-test--sidecar-text (root path)
   "The bytes of PATH's sidecar under ROOT, or nil when there is none."
@@ -1974,7 +1975,7 @@ before review records: everything a rewrite must put straight."
          (ticket (lambda (id)
                    (format "{\"timestamp\":\"2026-08-28T01:00:00Z\",\"commit\":\"abc\",\"ticket\":\"%s\",\"content-hash\":\"c\",\"file-hash\":\"%s\",\"end\":20,\"start\":10}\n"
                            id hash))))
-    (concat "{ \"schema\" : 3 }\n"
+    (concat "{ \"schema\" : 4 }\n"
             (funcall ticket (nth 2 order))
             (funcall region (nth 0 order))
             (format "{\"start\":25,\"end\":26,\"file-hash\":\"%s\",\"content-hash\":\"c\",\"commit\":\"abc\",\"reviewer\":\"Cy\",\"timestamp\":\"2026-08-28T01:00:00Z\"}\n"
@@ -2009,7 +2010,7 @@ before review records: everything a rewrite must put straight."
     (should-not (legu-test--sidecar-text root "a.txt"))
     ;; A sidecar that only ever held ticket references is one too.
     (legu-test--legu "ticket" "a.txt:1-2" "T-2")
-    (should (string-match-p "\\`{\"schema\":3}\n{\"start\":1,\"end\":2,\"ticket\":\"T-2\","
+    (should (string-match-p "\\`{\"schema\":4}\n{\"start\":1,\"end\":2,\"ticket\":\"T-2\","
                             (legu-test--sidecar-text root "a.txt")))
     (legu-test--legu "forget" "a.txt")
     (should-not (legu-test--sidecar-text root "a.txt"))))

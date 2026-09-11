@@ -322,7 +322,7 @@ of another schema still reads, so the caller can say which schema it met."
   "Absolute path of the sidecar recording RELPATH under ROOT (ADR-0017)."
   (expand-file-name (concat ".review/sidecars/" relpath ".jsonl") root))
 
-(defconst legu-sidecar-schema 3
+(defconst legu-sidecar-schema 4
   "The sidecar schema this package reads, the one the CLI writes.")
 
 (defvar legu--schema-warned nil

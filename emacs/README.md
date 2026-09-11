@@ -201,6 +201,10 @@ refuses. There is no setting that acts on a modified buffer silently.
 | `legu-evil-integration` | `t` | bind the queue and diff buffers for evil |
 | `legu-evil-source-motions` | `t` | `]r` `[r` `]g` `[g` in source buffers |
 
+Leave `legu-reviewer` unset in a signed store, one with a `.review/signers`.
+Emacs passes it to `legu mark` as `--reviewer`, and a signed store refuses
+`--reviewer` because it takes the name from the signers list.
+
 ## Doom Emacs and evil
 
 Install it the way you install any local package:

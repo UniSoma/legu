@@ -10,7 +10,8 @@
             [clojure.set :as set]
             [clojure.string :as str])
   (:import [java.nio.file FileAlreadyExistsException]
-           [java.security KeyPairGenerator MessageDigest]
+           [java.security KeyFactory KeyPairGenerator MessageDigest Signature]
+           [java.security.spec PKCS8EncodedKeySpec X509EncodedKeySpec]
            [java.time Instant]
            [java.time.temporal ChronoUnit]
            [java.util Arrays Base64 HexFormat]))
@@ -279,13 +280,18 @@
         :when public-key]
     {:public-key public-key :reviewer reviewer}))
 
+(defn- binding-of
+  "The binding for `public-key` in a signers list's text, or nil."
+  [text public-key]
+  (first (filter #(= public-key (:public-key %)) (parse-signers text))))
+
 ;; Sidecars are committed alongside the code, so a merge conflict in one is
 ;; expected. Reading collects them here and answers for every other file;
 ;; writing still refuses, because a write over a sidecar legu cannot parse
 ;; would drop the state it holds.
 (def ^:private store-errors (atom (sorted-map)))
 
-(def ^:private sidecar-schema 3)
+(def ^:private sidecar-schema 4)
 
 (defn- parse-line
   "The one JSON value on a sidecar line, or ::broken with the reason. Read
@@ -399,9 +405,12 @@
 ;; region and who and when, sits in the first sixty columns and the hashes
 ;; are a tail the eye skips. Records are sorted on every field they hold, in
 ;; this same order, so the same state is the same bytes whatever order it was
-;; reached in.
+;; reached in. A signed review record's signature is the last key, after the
+;; hashes, and so also the last tie-breaker (ADR-0016). This is the only list
+;; of keys: a key missing from it is dropped by every rewrite.
 (def ^:private record-keys
-  [:opaque :start :end :reviewer :ticket :timestamp :commit :file-hash :content-hash])
+  [:opaque :start :end :reviewer :ticket :timestamp :commit :file-hash :content-hash
+   :signature])
 
 (defn- render-record [record]
   (let [record (if (:opaque record)
@@ -412,6 +421,13 @@
                          (str (json/generate-string (name k)) ":"
                               (json/generate-string (get record k)))))
          "}")))
+
+(defn- signed-bytes
+  "The bytes a review record's signature covers (ADR-0016): the line
+   legu-review-record, a newline, then the record's line as `render-record`
+   writes it, without the signature key and without a trailing newline."
+  [record]
+  (.getBytes (str "legu-review-record\n" (render-record (dissoc record :signature))) "UTF-8"))
 
 (defn- record-order [record]
   (into [(or (:start record) 0) (or (:end record) 0)]
@@ -973,6 +989,176 @@
   [n width code]
   (paint (if (zero? n) :dim code) (format (str "%" width "d") n)))
 
+;; ---------------------------------------------------------------- keys
+
+(defn- key-dir
+  "Where this user's signing key lives (ADR-0016): legu/ under
+   $XDG_CONFIG_HOME, or under ~/.config when that is unset or empty."
+  []
+  (fs/file (or (not-empty (System/getenv "XDG_CONFIG_HOME"))
+               (fs/file (or (not-empty (System/getenv "HOME")) (str (fs/home))) ".config"))
+           "legu"))
+
+(defn- private-key-file [] (fs/file (key-dir) "key"))
+
+(defn- public-key-file [] (fs/file (key-dir) "key.pub"))
+
+(defn- base64 [^bytes bs]
+  (.encodeToString (Base64/getEncoder) bs))
+
+(defn cmd-key-init
+  "Creates the signing key: the 32-byte seed in key, owner-only, and the
+   32-byte public key in key.pub, each base64 on one line. Refuses when key
+   exists, so a second run cannot destroy the key a signers list names."
+  [{:keys [opts]}]
+  (let [private (private-key-file)
+        public (public-key-file)]
+    (fs/create-dirs (fs/parent private))
+    ;; babashka exposes no EdEC key classes, so the raw halves are cut out of
+    ;; the JDK's DER encodings: the seed after PKCS#8's 16-byte header, the
+    ;; public key after X.509's 12-byte one.
+    (let [pair (.generateKeyPair (KeyPairGenerator/getInstance "Ed25519"))
+          seed (Arrays/copyOfRange (.getEncoded (.getPrivate pair)) 16 48)
+          public-key (base64 (Arrays/copyOfRange (.getEncoded (.getPublic pair)) 12 44))]
+      ;; Owner-only from creation rather than chmodded after the seed is in it,
+      ;; and create-file's refusal of an existing file is the overwrite check:
+      ;; no separate test can race it.
+      (try (fs/create-file private {:posix-file-permissions "rw-------"})
+           (catch FileAlreadyExistsException _
+             (die (str "a signing key already exists at " private
+                       "; legu key init never replaces one"))))
+      ;; A key file left empty by a failed write would refuse every later init.
+      (try (spit private (str (base64 seed) "\n"))
+           (spit public (str public-key "\n"))
+           (catch Exception e
+             (fs/delete-if-exists private)
+             (throw e)))
+      (emit opts {:private-key-file (str private) :public-key-file (str public)
+                  :public-key public-key}
+            (fn [_] (println (str "created " private " and " public)))))))
+
+(defn- no-key [file]
+  (die (str "no signing key at " file "; create one with legu key init")))
+
+(defn- local-public-key
+  "This machine's public key, from key.pub: babashka cannot derive it from the
+   seed. Dies naming legu key init when there is none."
+  []
+  (let [public (public-key-file)]
+    (or (when (fs/exists? public) (not-empty (str/trim (slurp public))))
+        (no-key public))))
+
+(defn- local-binding
+  "The signers-list binding for this machine: the key from `local-public-key`
+   and the name from git config user.name. Dies naming what supplies whichever
+   half is missing."
+  []
+  (let [public-key (local-public-key)
+        reviewer (some-> (git-ok "config" "user.name") str/trim not-empty)]
+    (when-not reviewer
+      (die (str "git config user.name is not set, and the signers list names the key"
+                " after it; set it with git config user.name <name>")))
+    {:public-key public-key :reviewer reviewer}))
+
+;; The DER header PKCS#8 puts before an Ed25519 seed: babashka exposes no
+;; EdEC key spec, so a seed becomes a private key through this encoding.
+(def ^:private pkcs8-header
+  (byte-array [0x30 0x2e 0x02 0x01 0x00 0x30 0x05 0x06 0x03 0x2b 0x65 0x70 0x04 0x22 0x04 0x20]))
+
+;; And the one X.509 puts before an Ed25519 public key.
+(def ^:private x509-header
+  (byte-array [0x30 0x2a 0x30 0x05 0x06 0x03 0x2b 0x65 0x70 0x03 0x21 0x00]))
+
+(defn- ed25519-sign [private-key ^bytes data]
+  (.sign (doto (Signature/getInstance "Ed25519") (.initSign private-key) (.update data))))
+
+(defn- signing-key
+  "The private key in key, checked against `public-key`, the half key.pub
+   holds: halves from two pairs would sign records verify rejects. Dies when
+   key holds no 32-byte seed or the halves disagree."
+  [public-key]
+  (let [private (private-key-file)
+        unreadable #(die (str "cannot read the signing key at " private ": " %))
+        seed (try (.decode (Base64/getDecoder) (str/trim (slurp private)))
+                  (catch Exception e (unreadable (ex-message e))))
+        _ (when-not (= 32 (alength seed)) (unreadable "not a 32-byte seed"))
+        factory (KeyFactory/getInstance "Ed25519")
+        private-key (.generatePrivate
+                     factory (PKCS8EncodedKeySpec. (byte-array (concat pkcs8-header seed))))
+        public (try (.generatePublic
+                     factory (X509EncodedKeySpec.
+                              (byte-array (concat x509-header
+                                                  (.decode (Base64/getDecoder) public-key)))))
+                    (catch Exception e
+                      (die (str "cannot read the public key at " (public-key-file) ": "
+                                (ex-message e)))))
+        probe (.getBytes "legu-key-check" "UTF-8")]
+    (when-not (.verify (doto (Signature/getInstance "Ed25519") (.initVerify public) (.update probe))
+                       (ed25519-sign private-key probe))
+      (die (str "the signing key at " private " is not the private half of "
+                (public-key-file))))
+    private-key))
+
+(defn- signing-binding
+  "The binding a mark signs under, or nil in an unsigned store, where no key
+   is read. In a signed store the reviewer is the name the signers list gives
+   this machine's key, so a --reviewer is refused rather than written into a
+   record verify would reject. Reads and checks the private key here, before
+   mark prunes anything. Dies unless a listed key can sign."
+  [opts]
+  (when (fs/exists? (signers-file))
+    (when (contains? opts :reviewer)
+      (die (str "a signed store takes the reviewer from " signers-path
+                ", so mark does not take --reviewer")))
+    (let [public-key (local-public-key)
+          private (private-key-file)]
+      (when-not (fs/exists? private)
+        (no-key private))
+      (-> (or (binding-of (slurp (signers-file)) public-key)
+              (die (str signers-path " does not list the key in " (public-key-file)
+                        "; add it with legu key add")))
+          (assoc :private-key (signing-key public-key))))))
+
+(defn- sign-record
+  "`record` with its signature: Ed25519 over `signed-bytes` with `private-key`,
+   base64."
+  [record private-key]
+  (assoc record :signature (base64 (ed25519-sign private-key (signed-bytes record)))))
+
+(defn- signers-line [{:keys [public-key reviewer]}]
+  (str public-key " " reviewer))
+
+(defn cmd-key-show [{:keys [opts]}]
+  (let [binding (local-binding)]
+    (emit opts (assoc binding :line (signers-line binding))
+          (fn [{:keys [line]}] (println line)))))
+
+(defn cmd-key-add
+  "Lists this machine's key in the store's signers list, creating the list,
+   and with it .review/, when absent. A key already listed under the same name
+   is left as it is; under another name it is refused, since one key binds to
+   one reviewer."
+  [{:keys [opts]}]
+  (let [{:keys [public-key reviewer] :as binding} (local-binding)
+        f (signers-file)
+        text (if (fs/exists? f) (slurp f) "")
+        listed (binding-of text public-key)]
+    (when (and listed (not= reviewer (:reviewer listed)))
+      (die (str signers-path " already lists this key as " (:reviewer listed))))
+    (when-not listed
+      (fs/create-dirs (fs/parent f))
+      ;; A hand-edited list may end without a newline, and appending straight
+      ;; onto its last line would change that binding.
+      (spit f (str (when-not (or (empty? text) (str/ends-with? text "\n")) "\n")
+                   (signers-line binding) "\n")
+            :append true))
+    (emit opts (assoc binding :file signers-path :added (nil? listed))
+          (fn [{:keys [added]}]
+            (println (str (if added
+                            (str "added to " signers-path ": ")
+                            (str signers-path " already lists: "))
+                          (signers-line binding)))))))
+
 ;; ---------------------------------------------------------------- commands
 
 (defn region-of
@@ -1072,12 +1258,15 @@
       (save-state! (assoc pruned :path sidecar)))))
 
 (defn cmd-mark [{:keys [opts]}]
-  (let [{:keys [path start end opaque cur] :as region} (region-of (:target opts))
+  (let [signing (signing-binding opts)
+        {:keys [path start end opaque cur] :as region} (region-of (:target opts))
         whole? (or opaque (and (= 1 start) (= end (:line-count cur))))]
     (assert-readable! path)
     (purge! {:path path :start start :end end :whole? whole?} :regions contained?)
     (let [state (load-state path)
-          record (assoc (evidence-of region) :reviewer (reviewer opts))]
+          record (cond-> (assoc (evidence-of region)
+                                :reviewer (if signing (:reviewer signing) (reviewer opts)))
+                   signing (sign-record (:private-key signing)))]
       (save-state! (update state :regions #(conj (vec %) record)))
       (when-let [why (cond
                        ((ignored-files) path) "is excluded by .review/ignore"
@@ -1486,104 +1675,6 @@
                                 :unreviewed unr :reviewed rev :stale stl}
                                nil))))))
 
-;; ---------------------------------------------------------------- keys
-
-(defn- key-dir
-  "Where this user's signing key lives (ADR-0016): legu/ under
-   $XDG_CONFIG_HOME, or under ~/.config when that is unset or empty."
-  []
-  (fs/file (or (not-empty (System/getenv "XDG_CONFIG_HOME"))
-               (fs/file (or (not-empty (System/getenv "HOME")) (str (fs/home))) ".config"))
-           "legu"))
-
-(defn- private-key-file [] (fs/file (key-dir) "key"))
-
-(defn- public-key-file [] (fs/file (key-dir) "key.pub"))
-
-(defn- base64 [^bytes bs]
-  (.encodeToString (Base64/getEncoder) bs))
-
-(defn cmd-key-init
-  "Creates the signing key: the 32-byte seed in key, owner-only, and the
-   32-byte public key in key.pub, each base64 on one line. Refuses when key
-   exists, so a second run cannot destroy the key a signers list names."
-  [{:keys [opts]}]
-  (let [private (private-key-file)
-        public (public-key-file)]
-    (fs/create-dirs (fs/parent private))
-    ;; babashka exposes no EdEC key classes, so the raw halves are cut out of
-    ;; the JDK's DER encodings: the seed after PKCS#8's 16-byte header, the
-    ;; public key after X.509's 12-byte one.
-    (let [pair (.generateKeyPair (KeyPairGenerator/getInstance "Ed25519"))
-          seed (Arrays/copyOfRange (.getEncoded (.getPrivate pair)) 16 48)
-          public-key (base64 (Arrays/copyOfRange (.getEncoded (.getPublic pair)) 12 44))]
-      ;; Owner-only from creation rather than chmodded after the seed is in it,
-      ;; and create-file's refusal of an existing file is the overwrite check:
-      ;; no separate test can race it.
-      (try (fs/create-file private {:posix-file-permissions "rw-------"})
-           (catch FileAlreadyExistsException _
-             (die (str "a signing key already exists at " private
-                       "; legu key init never replaces one"))))
-      ;; A key file left empty by a failed write would refuse every later init.
-      (try (spit private (str (base64 seed) "\n"))
-           (spit public (str public-key "\n"))
-           (catch Exception e
-             (fs/delete-if-exists private)
-             (throw e)))
-      (emit opts {:private-key-file (str private) :public-key-file (str public)
-                  :public-key public-key}
-            (fn [_] (println (str "created " private " and " public)))))))
-
-(defn- local-binding
-  "The signers-list binding for this machine: the public key from key.pub and
-   the name from git config user.name. key.pub, not the seed, is the source of
-   the public key: babashka cannot derive one from the other. Dies naming
-   what supplies whichever half is missing."
-  []
-  (let [public (public-key-file)
-        public-key (when (fs/exists? public) (not-empty (str/trim (slurp public))))
-        reviewer (some-> (git-ok "config" "user.name") str/trim not-empty)]
-    (cond
-      (nil? public-key)
-      (die (str "no signing key at " public "; create one with legu key init"))
-      (nil? reviewer)
-      (die "git config user.name is not set, and the signers list names the key after it; set it with git config user.name <name>")
-      :else {:public-key public-key :reviewer reviewer})))
-
-(defn- signers-line [{:keys [public-key reviewer]}]
-  (str public-key " " reviewer))
-
-(defn cmd-key-show [{:keys [opts]}]
-  (let [binding (local-binding)]
-    (emit opts (assoc binding :line (signers-line binding))
-          (fn [{:keys [line]}] (println line)))))
-
-(defn cmd-key-add
-  "Lists this machine's key in the store's signers list, creating the list,
-   and with it .review/, when absent. A key already listed under the same name
-   is left as it is; under another name it is refused, since one key binds to
-   one reviewer."
-  [{:keys [opts]}]
-  (let [{:keys [public-key reviewer] :as binding} (local-binding)
-        f (signers-file)
-        text (if (fs/exists? f) (slurp f) "")
-        listed (first (filter #(= public-key (:public-key %)) (parse-signers text)))]
-    (when (and listed (not= reviewer (:reviewer listed)))
-      (die (str signers-path " already lists this key as " (:reviewer listed))))
-    (when-not listed
-      (fs/create-dirs (fs/parent f))
-      ;; A hand-edited list may end without a newline, and appending straight
-      ;; onto its last line would change that binding.
-      (spit f (str (when-not (or (empty? text) (str/ends-with? text "\n")) "\n")
-                   (signers-line binding) "\n")
-            :append true))
-    (emit opts (assoc binding :file signers-path :added (nil? listed))
-          (fn [{:keys [added]}]
-            (println (str (if added
-                            (str "added to " signers-path ": ")
-                            (str signers-path " already lists: "))
-                          (signers-line binding)))))))
-
 ;; ---------------------------------------------------------------- cli
 
 (def options
@@ -1598,7 +1689,7 @@
   "The options that belong to one command each. Every other command refuses
    them, so a flag that would have done nothing says so."
   {:reviewer {:validate #(and (string? %) (not (str/blank? %)))
-              :desc "who read it (default: git config user.name)"}
+              :desc "who read it (default: git config user.name; refused in a signed store)"}
    :limit {:coerce :long :validate pos? :desc "how many files `next` suggests"}
    ;; An enum, not a set: it keeps the order it is written in, so help and the
    ;; error name dir first, as the default and as the order a reader meets.

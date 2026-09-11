@@ -208,7 +208,7 @@
   ;; The Emacs package parses this line for its handshake (emacs/legu.el:599),
   ;; and the literals track VERSION and sidecar-schema in legu.
   (let [{:keys [exit out err]} (legu! (scratch-repo!) "--version")]
-    (is (= [0 "legu 0.5.0 (store schema 3)\n" ""] [exit out err]))))
+    (is (= [0 "legu 0.5.0 (store schema 4)\n" ""] [exit out err]))))
 
 (deftest version-in-json-carries-the-same-two-fields
   (let [dir (scratch-repo!)
@@ -216,7 +216,7 @@
         before (legu! dir "--json" "--version")]
     ;; The space before each colon is cheshire's pretty printer, which every
     ;; --json output goes through in emit.
-    (is (= "{\n  \"version\" : \"0.5.0\",\n  \"schema\" : 3\n}\n" (:out after)))
+    (is (= "{\n  \"version\" : \"0.5.0\",\n  \"schema\" : 4\n}\n" (:out after)))
     (is (= (:out after) (:out before)))
     (is (= [0 0] [(:exit after) (:exit before)]))
     (is (= ["" ""] [(:err after) (:err before)]))))
@@ -436,7 +436,7 @@
           content (sha256 "two\nthree\nfour")
           file (sha256 (get fixture "alpha.txt"))]
       (is (nil? more))
-      (is (= "{\"schema\":3}" header))
+      (is (= "{\"schema\":4}" header))
       ;; Region first, then who and when, then the evidence: the hashes are a
       ;; tail the eye skips. Timestamps are whole seconds.
       (is (re-matches (re-pattern (str "\\{\"start\":2,\"end\":4,"
@@ -480,9 +480,9 @@
     (legu! dir "ticket" "alpha.txt:5" "T-2")
     (legu! dir "ticket" "alpha.txt:1" "T-1")
     ;; Review records before ticket references, each run sorted by region.
-    (is (= ["{\"schema\":3}" "\"start\":1,\"end\":2,\"reviewer\"" "\"start\":4,\"end\":5,\"reviewer\""
+    (is (= ["{\"schema\":4}" "\"start\":1,\"end\":2,\"reviewer\"" "\"start\":4,\"end\":5,\"reviewer\""
             "\"start\":1,\"end\":1,\"ticket\"" "\"start\":5,\"end\":5,\"ticket\""]
-           (map #(re-find #"\{\"schema\":3\}|\"start\":\d+,\"end\":\d+,\"(?:reviewer|ticket)\"" %)
+           (map #(re-find #"\{\"schema\":4\}|\"start\":\d+,\"end\":\d+,\"(?:reviewer|ticket)\"" %)
                 (sidecar-lines dir "alpha.txt"))))))
 
 (deftest a-sidecar-with-nothing-left-in-it-is-removed
@@ -518,12 +518,12 @@
   (let [dir (scratch-repo!)]
     ;; A merge conflict, the way git leaves one.
     (write-sidecar! dir "alpha.txt"
-                    "<<<<<<< HEAD\n{\"schema\":3}\n=======\n{\"schema\":3}\n>>>>>>> other\n")
+                    "<<<<<<< HEAD\n{\"schema\":4}\n=======\n{\"schema\":4}\n>>>>>>> other\n")
     (refuses-the-sidecar dir "alpha.txt")
     ;; One line that does not parse, among lines that do: skipping it would
     ;; read around a conflict by dropping the records inside it.
     (write-sidecar! dir "sub/beta.txt"
-                    (str "{\"schema\":3}\n"
+                    (str "{\"schema\":4}\n"
                          "{\"start\":1,\"end\":1,\"reviewer\":\"x\",\"timestamp\":\"2026-01-01T00:00:00Z\","
                          "\"commit\":\"-\",\"file-hash\":\"a\",\"content-hash\":\"b\"}\n"
                          "{\"start\":2,\"end\":2,\"reviewer\":\"x\"\n"))
@@ -532,19 +532,20 @@
     ;; by hand and half-joined. The JSON parser would stop at the record and
     ;; call the line good.
     (write-sidecar! dir "alpha.txt"
-                    (str "{\"schema\":3}\n"
+                    (str "{\"schema\":4}\n"
                          "{\"start\":1,\"end\":1,\"reviewer\":\"x\",\"timestamp\":\"t\","
                          "\"commit\":\"-\",\"file-hash\":\"a\",\"content-hash\":\"b\"}>>>>>>> other\n"))
     (is (str/includes? (refuses-the-sidecar dir "alpha.txt") "line 2"))
     ;; A blank line is not a record either.
-    (write-sidecar! dir "alpha.txt" "{\"schema\":3}\n\n")
+    (write-sidecar! dir "alpha.txt" "{\"schema\":4}\n\n")
     (is (str/includes? (refuses-the-sidecar dir "alpha.txt") "line 2: blank line"))))
 
 (deftest a-sidecar-of-another-schema-is-refused-not-migrated
+  ;; lgu-01m28srsmekn moved legu to schema 4, so schema 3 is the older one.
   (let [dir (scratch-repo!)]
-    (write-sidecar! dir "alpha.txt" "{\"schema\":2}\n")
+    (write-sidecar! dir "alpha.txt" "{\"schema\":3}\n")
     (is (str/ends-with? (refuses-the-sidecar dir "alpha.txt")
-                        "schema 2 is not the schema legu writes (3)\n"))
+                        "schema 3 is not the schema legu writes (4)\n"))
     ;; The header is the first line; a record there is not one.
     (write-sidecar! dir "alpha.txt"
                     "{\"start\":1,\"end\":1,\"reviewer\":\"x\",\"timestamp\":\"t\",\"commit\":\"-\",\"file-hash\":\"a\",\"content-hash\":\"b\"}\n")
@@ -556,9 +557,9 @@
   (let [dir (scratch-repo!)
         broken (sort (concat ["-weird.txt" "a:b.txt" "sub/beta.txt"]
                              (for [i (range 40)] (format "gone/f%02d.txt" i))))
-        reason "schema 2 is not the schema legu writes (3)"]
+        reason "schema 3 is not the schema legu writes (4)"]
     (doseq [path broken]
-      (write-sidecar! dir path "{\"schema\":2}\n"))
+      (write-sidecar! dir path "{\"schema\":3}\n"))
     (doseq [args [["mark" "alpha.txt:1-2" "--reviewer" reviewer]
                   ["ticket" "alpha.txt:1-2" "T-1"]
                   ["forget" "alpha.txt:1-2"]]]
@@ -575,9 +576,9 @@
 (deftest a-line-that-is-neither-record-nor-reference-is-refused
   (let [dir (scratch-repo!)]
     (write-sidecar! dir "alpha.txt"
-                    "{\"schema\":3}\n{\"start\":1,\"end\":1,\"timestamp\":\"t\",\"commit\":\"-\",\"file-hash\":\"a\"}\n")
+                    "{\"schema\":4}\n{\"start\":1,\"end\":1,\"timestamp\":\"t\",\"commit\":\"-\",\"file-hash\":\"a\"}\n")
     (is (str/includes? (refuses-the-sidecar dir "alpha.txt") "not a review record"))
-    (write-sidecar! dir "alpha.txt" "{\"schema\":3}\n[1,2,3]\n")
+    (write-sidecar! dir "alpha.txt" "{\"schema\":4}\n[1,2,3]\n")
     (is (str/includes? (refuses-the-sidecar dir "alpha.txt") "not a review record"))))
 
 ;; ---------------------------------------------------------------- store layout
@@ -771,6 +772,146 @@
            (run "key" "add")))
     (is (= {"file" ".review/signers" "public-key" key "reviewer" reviewer "added" false}
            (run "key" "add")))))
+
+;; ------------------------------------------------------- signed review records
+
+;; ADR-0016: a store with a signers list is signed, and mark signs each review
+;; record with the local key under the name the list gives it.
+
+(def ^:private listed-elsewhere
+  "A binding for a key no scratch tree holds."
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= Someone Else\n")
+
+(defn- list-key!
+  "Creates the scratch tree's key and a signers list binding it to `name`.
+   Returns the public key."
+  [dir name]
+  (legu! dir "key" "init")
+  (let [key (public-key dir)]
+    (write-files! dir {".review/signers" (str key " " name "\n")})
+    key))
+
+(defn- alpha-2-4
+  "A pattern for the review record of alpha.txt:2-4 under `name`, with
+   `signature` as its last key when given."
+  [name signature]
+  (re-pattern (str "\\{\"start\":2,\"end\":4,"
+                   "\"reviewer\":\"" name "\","
+                   "\"timestamp\":\"" timestamp-re "\","
+                   "\"commit\":\"[0-9a-f]{40}\","
+                   "\"file-hash\":\"" (sha256 (get fixture "alpha.txt")) "\","
+                   "\"content-hash\":\"" (sha256 "two\nthree\nfour") "\""
+                   (when signature (str ",\"signature\":\"" signature "\""))
+                   "\\}")))
+
+(def ^:private base64-64-bytes "[A-Za-z0-9+/]{86}==")
+
+(defn- verifies?
+  "Whether the signature ending `line` holds for the base64 `public-key` over
+   the bytes the README documents: legu-review-record, a newline, then the
+   line without its signature key. Built from the JDK and the README alone,
+   so it can disagree with legu's renderer."
+  [public-key line]
+  (let [[_ unsigned signature] (re-matches #"(.*),\"signature\":\"([^\"]*)\"\}" line)
+        decode #(.decode (java.util.Base64/getDecoder) ^String %)
+        ;; The X.509 header of an Ed25519 public key, before its 32 raw bytes.
+        x509 [0x30 0x2a 0x30 0x05 0x06 0x03 0x2b 0x65 0x70 0x03 0x21 0x00]
+        public (.generatePublic (java.security.KeyFactory/getInstance "Ed25519")
+                                (java.security.spec.X509EncodedKeySpec.
+                                 (byte-array (concat x509 (decode public-key)))))
+        verifier (java.security.Signature/getInstance "Ed25519")]
+    (boolean
+     (when signature
+       (.initVerify verifier public)
+       (.update verifier (.getBytes (str "legu-review-record\n" unsigned "}") "UTF-8"))
+       (.verify verifier (decode signature))))))
+
+(deftest a-mark-in-a-signed-store-is-signed-under-the-listed-name
+  ;; The listed name is not git's, and git's is empty: in a signed store the
+  ;; name comes from the signers list and git is never asked for one.
+  (let [dir (scratch-repo!)
+        key (list-key! dir "Listed Name")]
+    (git! dir "config" "user.name" "")
+    (is (= [0 ""] ((juxt :exit :err) (legu! dir "mark" "alpha.txt:2-4"))))
+    (let [[header record & more] (sidecar-lines dir "alpha.txt")]
+      (is (= "{\"schema\":4}" header))
+      ;; Still one line per record, the signature last, after the hashes.
+      (is (nil? more))
+      (is (re-matches (alpha-2-4 "Listed Name" base64-64-bytes) record) record)
+      (is (verifies? key record))
+      (is (not (verifies? key (str/replace record "Listed Name" "Listed Namf")))))))
+
+(deftest a-ticket-reference-in-a-signed-store-is-not-signed
+  (let [dir (scratch-repo!)]
+    (write-files! dir {".review/signers" listed-elsewhere})
+    (is (= [0 ""] ((juxt :exit :err) (legu! dir "ticket" "alpha.txt:3" "T-1"))))
+    (is (not (str/includes? (second (sidecar-lines dir "alpha.txt")) "signature")))))
+
+(deftest a-mark-in-a-signed-store-refuses-what-it-cannot-sign
+  (let [dir (scratch-repo!)
+        mark ["mark" "alpha.txt:1-2"]]
+    (write-files! dir {".review/signers" listed-elsewhere})
+    (fails-with dir mark (str "no signing key at " (key-file dir "key.pub")
+                              "; create one with legu key init"))
+    (legu! dir "key" "init")
+    (fails-with dir mark (str ".review/signers does not list the key in " (key-file dir "key.pub")
+                              "; add it with legu key add"))
+    (legu! dir "key" "add")
+    (fails-with dir (conj mark "--reviewer" reviewer)
+                "a signed store takes the reviewer from .review/signers, so mark does not take --reviewer")
+    (fs/delete (key-file dir "key"))
+    (fails-with dir mark (str "no signing key at " (key-file dir "key")
+                              "; create one with legu key init"))
+    (is (nil? (sidecar-lines dir "alpha.txt")))))
+
+(deftest a-refused-mark-leaves-the-sidecar-as-it-was
+  ;; The key is read and checked before mark prunes anything, so a re-mark
+  ;; that would supersede a record and then cannot sign leaves it in place.
+  (let [dir (scratch-repo!)
+        other (scratch-repo!)
+        remark ["mark" "alpha.txt:1-5"]]
+    (legu! dir "key" "init")
+    (legu! dir "key" "add")
+    (is (zero? (:exit (legu! dir "mark" "alpha.txt:2-4"))))
+    (let [before (sidecar-lines dir "alpha.txt")]
+      (spit (key-file dir "key") "not a key\n")
+      (let [{:keys [exit out err]} (apply legu! dir remark)]
+        (is (= [1 ""] [exit out]))
+        (is (str/starts-with? err (str "legu: cannot read the signing key at "
+                                       (key-file dir "key") ": "))))
+      (legu! other "key" "init")
+      (fs/copy (key-file other "key") (key-file dir "key") {:replace-existing true})
+      (fails-with dir remark (str "the signing key at " (key-file dir "key")
+                                  " is not the private half of " (key-file dir "key.pub")))
+      (is (= before (sidecar-lines dir "alpha.txt"))))))
+
+(deftest a-mark-in-an-unsigned-store-reads-no-key-and-signs-nothing
+  ;; A key that could not sign anything, and no signers list to call for one.
+  (let [dir (scratch-repo!)]
+    (legu! dir "key" "init")
+    (spit (key-file dir "key") "not a key\n")
+    (is (= [0 ""] ((juxt :exit :err) (legu! dir "mark" "alpha.txt:2-4"))))
+    (let [[header record & more] (sidecar-lines dir "alpha.txt")]
+      (is (= "{\"schema\":4}" header))
+      (is (nil? more))
+      (is (re-matches (alpha-2-4 reviewer nil) record) record))))
+
+(deftest forget-and-supersede-leave-the-signatures-of-other-records-alone
+  (let [dir (scratch-repo!)
+        key (list-key! dir reviewer)
+        _ (legu! dir "mark" "alpha.txt:1-2")
+        _ (legu! dir "mark" "alpha.txt:4-5")
+        [_ kept replaced] (sidecar-lines dir "alpha.txt")]
+    (is (verifies? key kept))
+    (is (verifies? key replaced))
+    ;; A second mark of 4-5 supersedes that record and no other.
+    (is (= 0 (:exit (legu! dir "mark" "alpha.txt:4-5"))))
+    (let [[_ first-line second-line & more] (sidecar-lines dir "alpha.txt")]
+      (is (= kept first-line))
+      (is (verifies? key second-line))
+      (is (nil? more)))
+    (is (= 0 (:exit (legu! dir "forget" "alpha.txt:4-5"))))
+    (is (= [kept] (rest (sidecar-lines dir "alpha.txt"))))))
 
 ;; ---------------------------------------------------------------- completion
 
@@ -1033,10 +1174,15 @@
 (deftest the-same-state-renders-as-the-same-bytes
   ;; Called directly: through the command line every record carries the second
   ;; it was made in, so two orders of the same marks cannot be compared byte
-  ;; for byte. The literal is the layout ADR-0015 fixes.
+  ;; for byte. The literal is the layout ADR-0015 fixes, with the signature
+  ;; lgu-01m28srsmekn added as the last key and the last tie-breaker: c and d
+  ;; differ in nothing else.
   (let [render #'legu.main/render-sidecar
         a {:start 10 :end 20 :reviewer "a \"quoted\" name" :timestamp "2026-08-28T10:00:28Z"
-           :commit "c439a988" :file-hash "be9c" :content-hash "d65c"}
+           :commit "c439a988" :file-hash "be9c" :content-hash "d65c" :signature "c2lnbmVk"}
+        c {:start 30 :end 31 :reviewer "c" :timestamp "2026-08-28T10:00:28Z"
+           :commit "c439a988" :file-hash "be9c" :content-hash "1111" :signature "BBBB"}
+        d (assoc c :signature "AAAA")
         b {:start 1 :end 5 :reviewer "b" :timestamp "2026-08-28T10:00:28Z"
            :commit "c439a988" :file-hash "be9c" :content-hash "0000"}
         ;; An opaque record made from a region still carries nil bounds.
@@ -1044,13 +1190,15 @@
            :ticket "lgu-01k7" :timestamp "2026-08-28T10:00:29Z" :commit "c439a988" :file-hash "be9c"}
         t {:start 1 :end 1 :ticket "T-1" :timestamp "2026-08-28T10:00:29Z"
            :commit "c439a988" :file-hash "be9c" :content-hash "0000"}
-        expected (str "{\"schema\":3}\n"
+        expected (str "{\"schema\":4}\n"
                       "{\"start\":1,\"end\":5,\"reviewer\":\"b\",\"timestamp\":\"2026-08-28T10:00:28Z\",\"commit\":\"c439a988\",\"file-hash\":\"be9c\",\"content-hash\":\"0000\"}\n"
-                      "{\"start\":10,\"end\":20,\"reviewer\":\"a \\\"quoted\\\" name\",\"timestamp\":\"2026-08-28T10:00:28Z\",\"commit\":\"c439a988\",\"file-hash\":\"be9c\",\"content-hash\":\"d65c\"}\n"
+                      "{\"start\":10,\"end\":20,\"reviewer\":\"a \\\"quoted\\\" name\",\"timestamp\":\"2026-08-28T10:00:28Z\",\"commit\":\"c439a988\",\"file-hash\":\"be9c\",\"content-hash\":\"d65c\",\"signature\":\"c2lnbmVk\"}\n"
+                      "{\"start\":30,\"end\":31,\"reviewer\":\"c\",\"timestamp\":\"2026-08-28T10:00:28Z\",\"commit\":\"c439a988\",\"file-hash\":\"be9c\",\"content-hash\":\"1111\",\"signature\":\"AAAA\"}\n"
+                      "{\"start\":30,\"end\":31,\"reviewer\":\"c\",\"timestamp\":\"2026-08-28T10:00:28Z\",\"commit\":\"c439a988\",\"file-hash\":\"be9c\",\"content-hash\":\"1111\",\"signature\":\"BBBB\"}\n"
                       "{\"opaque\":true,\"ticket\":\"lgu-01k7\",\"timestamp\":\"2026-08-28T10:00:29Z\",\"commit\":\"c439a988\",\"file-hash\":\"be9c\"}\n"
                       "{\"start\":1,\"end\":1,\"ticket\":\"T-1\",\"timestamp\":\"2026-08-28T10:00:29Z\",\"commit\":\"c439a988\",\"file-hash\":\"be9c\",\"content-hash\":\"0000\"}\n")]
-    (is (= expected (render {:regions [a b] :tickets [o t]})))
-    (is (= expected (render {:regions [b a] :tickets [t o]})))))
+    (is (= expected (render {:regions [a b c d] :tickets [o t]})))
+    (is (= expected (render {:regions [c d b a] :tickets [t o]})))))
 
 (let [{:keys [fail error]} (try (run-tests) (finally (run! fs/delete-tree @scratch-dirs)))]
   (System/exit (if (pos? (+ fail error)) 1 0)))

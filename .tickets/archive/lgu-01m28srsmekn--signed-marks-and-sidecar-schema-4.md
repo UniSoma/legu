@@ -1,29 +1,30 @@
 ---
 id: lgu-01m28srsmekn
 title: Signed marks and sidecar schema 4
-status: open
+status: closed
 type: feature
 priority: 2
 mode: afk
 created: '2026-09-11T17:55:41.318535816Z'
-updated: '2026-09-11T17:55:59.245767549Z'
+updated: '2026-09-11T19:37:30.294233428Z'
+closed: '2026-09-11T19:37:30.294233428Z'
 parent: lgu-01m28sh82tk1
 tags:
 - ready-for-agent
 - signing
 acceptance:
 - title: Mark in a signed store takes the name from the signers list, rejects --reviewer, and fails naming key init or key add when the key is missing or unlisted
-  done: false
+  done: true
 - title: Mark in an unsigned store writes a sidecar identical to today's apart from the schema 4 header
-  done: false
+  done: true
 - title: Schema 3 is refused by CLI and Emacs; --version reports schema 4; the same signed state renders as the same bytes
-  done: false
+  done: true
 - title: Forget and supersede on signed records keep the signature of records they leave in place
-  done: false
+  done: true
 - title: README documents the bytes signed and marking in a signed store
-  done: false
+  done: true
 - title: Mark in a signed store writes a record whose last key is signature, verifiable against the listed public key over the documented bytes
-  done: false
+  done: true
 deps:
 - lgu-01m28srsgket
 ---
@@ -41,3 +42,9 @@ The sidecar schema becomes 4 in the CLI and in the Emacs package; schema 3 is re
 ### Blocked by
 
 - lgu-01m28srsgket
+
+## Notes
+
+**2026-09-11T19:37:30.294233428Z**
+
+In a store with .review/signers, mark signs each review record with the local key: Ed25519 over 'legu-review-record\n' plus the record line without its signature, stored last as base64. The name comes from the signers list; --reviewer, a missing key, an unlisted key, an unreadable key and a key.pub from another pair are all refused before anything is written. Unsigned stores are unchanged apart from the schema 4 header. Schema 3 is refused by the CLI and Emacs; --version reports 4.
