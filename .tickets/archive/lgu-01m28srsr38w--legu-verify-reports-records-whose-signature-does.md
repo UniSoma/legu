@@ -1,27 +1,28 @@
 ---
 id: lgu-01m28srsr38w
 title: legu verify reports records whose signature does not hold
-status: open
+status: closed
 type: feature
 priority: 2
 mode: afk
 created: '2026-09-11T17:55:41.440534575Z'
-updated: '2026-09-11T17:55:59.353047383Z'
+updated: '2026-09-11T20:05:44.788261568Z'
+closed: '2026-09-11T20:05:44.788261568Z'
 parent: lgu-01m28sh82tk1
 tags:
 - ready-for-agent
 - signing
 acceptance:
 - title: verify exits 1 on any failure, 0 on a clean store and 0 with a message on an unsigned store; a path argument scopes the walk
-  done: false
+  done: true
 - title: --json emits every finding; help and completion list verify
-  done: false
+  done: true
 - title: Reading commands do not verify and still count a record that would fail
-  done: false
+  done: true
 - title: README documents verify and the trust limit of the signers list
-  done: false
+  done: true
 - title: verify reports each of bad-signature, unlisted-signer, name-mismatch and unsigned on hand-tampered sidecars, and a store-level finding for an unparseable signers line
-  done: false
+  done: true
 deps:
 - lgu-01m28srsmekn
 ---
@@ -39,3 +40,9 @@ Tests tamper with sidecars in the scratch repo by rewriting them, as the corrupt
 ### Blocked by
 
 - lgu-01m28srsmekn
+
+## Notes
+
+**2026-09-11T20:05:44.788261568Z**
+
+legu verify [<path>] reports every review record whose signature does not hold: bad-signature, unlisted-signer, name-mismatch or unsigned, trying the reviewer's own keys first. Signers-list lines that do not parse, keys listed twice and unreadable sidecars are reported too. Exit 1 on any failure, 0 on a clean store or an unsigned one. --json gives every finding; help and completion list verify. Reading commands never verify.

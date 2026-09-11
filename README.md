@@ -68,6 +68,7 @@ legu coverage                          # the three numbers
 legu key init                          # create this machine's signing key
 legu key show                          # print the key's line for a signers list
 legu key add                           # add that line to .review/signers
+legu verify [<path>]                   # report records whose signature fails
 ```
 
 Each option belongs to the one command that reads it, and stands after that
@@ -442,6 +443,66 @@ superseding `mark` remove whole records, and the records they leave keep their
 signatures. Ticket references carry no signature, so `legu ticket` needs no key.
 In an unsigned store, `mark` reads no key and writes no signature.
 
+### Verify
+
+`legu verify` checks every review record in the store against the signers
+list. `legu verify <path>` checks only the records of that file, or of the
+files under that directory. It reads public keys from `.review/signers` and
+needs no local key, so a CI job can run it.
+
+Each review record gets one outcome:
+
+- `valid`: a key the signers list binds to the record's reviewer made the
+  signature over the record as it stands.
+- `bad-signature`: the signature is not 64 bytes of base64, or no key listed
+  for the reviewer made it. An edit to any field of the record, a hash
+  included, lands here.
+- `unlisted-signer`: the signers list binds no key to the record's reviewer.
+- `name-mismatch`: a listed key made the signature, but the signers list binds
+  that key to another name.
+- `unsigned`: the record has no signature. Records written before the store
+  had a signers list land here, and re-marking the region signs it.
+
+A record does not say which key signed it. So a listed reviewer who marks from
+a second machine whose key is not in the list also gets `bad-signature`, and
+`legu key add` on that machine fixes it.
+
+The output lists each record that is not valid on one line: the sidecar, the
+region, the reviewer, the outcome and the reason. Each line of the signers list
+that does not parse gets a line with its line number. A count ends the output:
+
+```
+$ legu verify
+.review/sidecars/src/core.clj.jsonl  src/core.clj:40-95  jonas  bad-signature  (no key listed for jonas made this signature)
+12 review records, 1 not valid
+```
+
+`verify` exits 1 when a record is not valid, a sidecar cannot be read, or a
+line of the signers list does not parse, and 0 otherwise, so CI can gate on it.
+In an unsigned store it prints `the store is not signed: there is no
+.review/signers` and exits 0.
+
+With `--json`, `verify` prints an object:
+
+- `signed`: false in an unsigned store, where both arrays are empty.
+- `records`: every review record checked, valid ones included, each with
+  `file` (its sidecar), `path`, `start` and `end` (absent for an opaque
+  record), `reviewer`, `outcome` (one of the five above) and `reason` (null
+  when valid).
+- `signers-errors`: every line of `.review/signers` that does not parse, with
+  `line` (counted from 1), `text` and `reason`.
+- `errors`: the sidecars `verify` could not read, as every command reports them.
+
+`status`, `stale`, `next`, `regions` and `coverage` never check signatures.
+They count a record that fails `verify` as reviewed or stale like any other,
+so a verification problem never changes the numbers. Ticket references carry
+no signature, and `verify` skips them.
+
+A signature proves only that a key in the list made the record. A listed key
+is as trustworthy as the commit that listed it: anyone who can push can add a
+key to `.review/signers` under any name. git's `allowed_signers` file has the
+same limit. Review a change to `.review/signers` the way you review code.
+
 ## Ticket references, not prose
 
 `legu ticket` stores a ticket id against a region. The ticket's content and
@@ -503,6 +564,10 @@ The Emacs package has its own ERT suite, documented under
 - A mark cannot retire a record held in a sidecar it could not read, so that
   record survives as a ghost until the sidecar is fixed. The mark still lands,
   and names the sidecar it skipped.
+- `verify` trusts `.review/signers` as committed: a listed key is only as
+  trustworthy as the commit that added it. A listed reviewer who marks from a
+  machine whose key is not listed gets `bad-signature` until that machine runs
+  `legu key add`.
 
 ## Cost
 

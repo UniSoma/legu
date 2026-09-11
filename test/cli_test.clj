@@ -107,7 +107,7 @@
     ;; Pinned by the names it must contain, not verbatim: the blob itself is
     ;; regenerated when the parser moves to babashka.cli.
     (doseq [named ["mark" "ticket" "forget" "status" "regions" "stale" "next" "coverage"
-                   "key" "--json" "--version"]]
+                   "key" "verify" "--json" "--version"]]
       (is (str/includes? (:out bare) named) named))
     ;; key is one line at the root; its subcommands are a `legu key --help` away.
     (doseq [subcommand ["init" "show" "add"]]
@@ -124,7 +124,8 @@
         status (:out (legu! dir "status" "--help"))
         regions (:out (legu! dir "regions" "--help"))
         queue (:out (legu! dir "next" "--help"))
-        stale (:out (legu! dir "stale" "--help"))]
+        stale (:out (legu! dir "stale" "--help"))
+        verify (:out (legu! dir "verify" "--help"))]
     (is (str/includes? mark "Arguments:"))
     (is (str/includes? mark "<target>"))
     (is (str/includes? mark "--reviewer"))
@@ -134,13 +135,15 @@
     (is (str/includes? regions "<path>"))
     (is (not (str/includes? regions "[<path>]")))
     (is (str/includes? status "[<path>]"))
+    (is (str/includes? verify "[<path>]"))
+    (is (not (str/includes? verify "--reviewer")))
     (is (str/includes? status "--gaps"))
     (is (not (str/includes? status "--limit")))
     ;; An enum keeps the order it was declared in, so the default reads first.
     (is (str/includes? queue "(one of: dir, cochange)"))
     (is (not (str/includes? stale "Arguments:")))
     ;; --json is legu's own, so it survives on every page.
-    (doseq [page [mark status regions queue stale]]
+    (doseq [page [mark status regions queue stale verify]]
       (is (str/includes? page "--json") page))))
 
 (deftest key-lists-its-subcommands-with-or-without-help
@@ -328,7 +331,8 @@
                             [["coverage" "extra"] "unexpected argument: extra"]
                             [["key" "init" "extra"] "unexpected argument: extra"]
                             [["key" "show" "extra"] "unexpected argument: extra"]
-                            [["key" "add" "extra"] "unexpected argument: extra"]]]
+                            [["key" "add" "extra"] "unexpected argument: extra"]
+                            [["verify" "a" "b"] "unexpected argument: b"]]]
       (fails-with dir args message))))
 
 (deftest a-command-names-the-argument-it-is-missing
@@ -913,6 +917,248 @@
     (is (= 0 (:exit (legu! dir "forget" "alpha.txt:4-5"))))
     (is (= [kept] (rest (sidecar-lines dir "alpha.txt"))))))
 
+;; ---------------------------------------------------------------- verify
+
+;; ADR-0016: verify checks every review record's signature against the
+;; signers list and exits 1 when any does not hold, so CI can gate on it. The
+;; tampering is done by rewriting the scratch tree's files by hand.
+
+(defn- verify! [dir & args]
+  ((juxt :exit :out :err) (apply legu! dir "verify" args)))
+
+(defn- strip-signature [line]
+  (str/replace line #",\"signature\":\"[^\"]*\"" ""))
+
+(deftest verify-in-an-unsigned-store-says-so-and-passes
+  (let [dir (scratch-repo!)]
+    (legu! dir "mark" "alpha.txt:2-4")
+    (is (= [0 "the store is not signed: there is no .review/signers\n" ""]
+           (verify! dir)))
+    (is (= {:signed false :records [] :signers-errors []}
+           (json/parse-string (:out (legu! dir "verify" "--json")) true)))))
+
+(defn- rewrite! [file f]
+  (spit file (f (slurp file))))
+
+(defn- verify-json [dir & args]
+  (let [{:keys [exit out]} (apply legu! dir "verify" "--json" args)]
+    (assoc (json/parse-string out true) :exit exit)))
+
+(defn- signed-store!
+  "A signed scratch tree with alpha.txt:2-4 and all of sub/beta.txt marked
+   under the listed name. Returns the tree."
+  []
+  (let [dir (scratch-repo!)]
+    (list-key! dir reviewer)
+    (legu! dir "mark" "alpha.txt:2-4")
+    (legu! dir "mark" "sub/beta.txt")
+    dir))
+
+(defn- alpha-finding
+  "What verify's human output says of the alpha.txt:2-4 record, then the
+   count of a store holding it and beta's valid record."
+  [outcome reason]
+  (str ".review/sidecars/alpha.txt.jsonl  alpha.txt:2-4  " reviewer "  " outcome "  (" reason ")\n"
+       "2 review records, 1 not valid\n"))
+
+(defn- outcomes [dir]
+  (mapv (juxt :path :outcome) (:records (verify-json dir))))
+
+(deftest verify-passes-a-store-whose-records-all-hold
+  (let [dir (signed-store!)]
+    (is (= [0 "2 review records, all valid\n" ""]
+           (verify! dir)))
+    (is (= {:exit 0
+            :signed true
+            :records [{:file ".review/sidecars/alpha.txt.jsonl" :path "alpha.txt" :start 2 :end 4
+                       :reviewer reviewer :outcome "valid" :reason nil}
+                      {:file ".review/sidecars/sub/beta.txt.jsonl" :path "sub/beta.txt" :start 1 :end 3
+                       :reviewer reviewer :outcome "valid" :reason nil}]
+            :signers-errors []}
+           (verify-json dir)))))
+
+(deftest verify-reports-a-hash-edited-under-a-valid-signature
+  (let [dir (signed-store!)]
+    (rewrite! (sidecar-file dir "alpha.txt")
+              #(str/replace % (sha256 (get fixture "alpha.txt")) (sha256 "edited")))
+    (is (= [1 (alpha-finding "bad-signature" (str "no key listed for " reviewer " made this signature")) ""]
+           (verify! dir)))
+    (is (= [["alpha.txt" "bad-signature"] ["sub/beta.txt" "valid"]] (outcomes dir)))
+    (is (= 1 (:exit (verify-json dir))))))
+
+(deftest verify-reports-a-signature-that-is-not-one-without-crashing
+  (let [dir (signed-store!)
+        f (sidecar-file dir "alpha.txt")
+        signature #"\"signature\":\"[^\"]*\""]
+    (doseq [replacement ["\"signature\":\"not base64!\"" "\"signature\":\"AAAA\"" "\"signature\":7"]]
+      (rewrite! f #(str/replace-first % signature replacement))
+      (is (= [1 (alpha-finding "bad-signature" "the signature is not 64 bytes of base64") ""]
+             (verify! dir))
+          replacement)
+      (rewrite! f #(str/replace-first % #"\"signature\":(\"[^\"]*\"|7)" "\"signature\":\"\"")))))
+
+(defn- hand-written-alpha!
+  "Replaces alpha.txt's sidecar with one review record of 2-4 under the JSON
+   `reviewer`, carrying a well-formed signature no key made."
+  [dir reviewer-json]
+  (write-sidecar! dir "alpha.txt"
+                  (str "{\"schema\":4}\n"
+                       "{\"start\":2,\"end\":4,\"reviewer\":" reviewer-json ","
+                       "\"timestamp\":\"2020-01-01T00:00:00Z\",\"commit\":\"" (apply str (repeat 40 "0")) "\","
+                       "\"file-hash\":\"" (sha256 (get fixture "alpha.txt")) "\","
+                       "\"content-hash\":\"" (sha256 "two\nthree\nfour") "\","
+                       "\"signature\":\"" (apply str (repeat 86 "A")) "==\"}\n")))
+
+(deftest verify-reports-a-record-whose-reviewer-has-no-listed-key
+  (let [dir (signed-store!)]
+    (hand-written-alpha! dir "\"Nobody\"")
+    (is (= [1 (str ".review/sidecars/alpha.txt.jsonl  alpha.txt:2-4  Nobody  unlisted-signer"
+                   "  (.review/signers lists no key for Nobody)\n"
+                   "2 review records, 1 not valid\n")
+            ""]
+           (verify! dir)))
+    (is (= [["alpha.txt" "unlisted-signer"] ["sub/beta.txt" "valid"]] (outcomes dir)))
+    ;; A null reviewer is the name no binding has, not a match for the
+    ;; missing signer's.
+    (hand-written-alpha! dir "null")
+    (is (= [1 (str ".review/sidecars/alpha.txt.jsonl  alpha.txt:2-4  null  unlisted-signer"
+                   "  (.review/signers lists no key for null)\n"
+                   "2 review records, 1 not valid\n")
+            ""]
+           (verify! dir)))))
+
+(deftest verify-reports-a-name-the-signers-list-does-not-give-the-key
+  (let [dir (signed-store!)]
+    (write-files! dir {".review/signers" (str (public-key dir) " Someone Else\n")})
+    (is (= [1 (str ".review/sidecars/alpha.txt.jsonl  alpha.txt:2-4  " reviewer "  name-mismatch"
+                   "  (signed by the key .review/signers lists for Someone Else)\n"
+                   ".review/sidecars/sub/beta.txt.jsonl  sub/beta.txt:1-3  " reviewer "  name-mismatch"
+                   "  (signed by the key .review/signers lists for Someone Else)\n"
+                   "2 review records, 2 not valid\n")
+            ""]
+           (verify! dir)))
+    (is (= [["alpha.txt" "name-mismatch"] ["sub/beta.txt" "name-mismatch"]] (outcomes dir)))))
+
+(deftest verify-reports-a-record-with-its-signature-removed
+  (let [dir (signed-store!)]
+    (rewrite! (sidecar-file dir "alpha.txt") strip-signature)
+    (is (= [1 (alpha-finding "unsigned" "no signature in a signed store") ""]
+           (verify! dir)))
+    (is (= [["alpha.txt" "unsigned"] ["sub/beta.txt" "valid"]] (outcomes dir)))))
+
+(deftest verify-reports-each-signers-line-that-does-not-parse-once
+  (let [dir (signed-store!)
+        key (public-key dir)]
+    (write-files! dir {".review/signers" (str "# trusted\n\n" key " " reviewer "\n"
+                                              "onlyonefield\n"
+                                              "AAAA Short Key\n")})
+    (is (= [1 (str ".review/signers:4  onlyonefield  (not a public key, one space, then a name)\n"
+                   ".review/signers:5  AAAA Short Key  (not a 32-byte Ed25519 public key in base64)\n"
+                   "2 review records, all valid; 2 lines of .review/signers do not parse\n")
+            ""]
+           (verify! dir)))
+    (is (= {:exit 1
+            :signers-errors [{:line 4 :text "onlyonefield"
+                              :reason "not a public key, one space, then a name"}
+                             {:line 5 :text "AAAA Short Key"
+                              :reason "not a 32-byte Ed25519 public key in base64"}]}
+           (select-keys (verify-json dir) [:exit :signers-errors])))
+    (is (= [["alpha.txt" "valid"] ["sub/beta.txt" "valid"]] (outcomes dir)))))
+
+(deftest verify-scopes-to-a-file-or-a-directory
+  (let [dir (signed-store!)]
+    (rewrite! (sidecar-file dir "alpha.txt") strip-signature)
+    (doseq [path ["sub" "sub/" "sub/beta.txt"]]
+      (is (= [0 "1 review record, all valid\n" ""]
+             (verify! dir path))
+          path))
+    (is (= [["alpha.txt" "unsigned"]] (mapv (juxt :path :outcome) (:records (verify-json dir "alpha.txt")))))
+    (is (= [1 (str ".review/sidecars/alpha.txt.jsonl  alpha.txt:2-4  " reviewer "  unsigned"
+                   "  (no signature in a signed store)\n"
+                   "1 review record, 1 not valid\n")
+            ""]
+           (verify! dir "alpha.txt")))))
+
+(deftest verify-fails-on-a-sidecar-it-cannot-read-under-its-path
+  (let [dir (signed-store!)
+        f (sidecar-file dir "sub/beta.txt")]
+    (rewrite! f #(str % "<<<<<<< HEAD\n"))
+    (let [{:keys [exit out err]} (legu! dir "verify")]
+      (is (= [1 "1 review record, all valid; 1 sidecar could not be read\n"] [exit out]))
+      (is (str/starts-with? err (str "legu: cannot read " f ": ")) err))
+    (is (= [{:file ".review/sidecars/sub/beta.txt.jsonl"}]
+           (mapv #(select-keys % [:file]) (:errors (verify-json dir)))))
+    (is (= [0 "1 review record, all valid\n" ""]
+           (verify! dir "alpha.txt")))))
+
+(deftest verify-needs-no-local-key
+  (let [dir (signed-store!)]
+    (fs/delete-tree (fs/file (config-home dir) "legu"))
+    (is (= [0 "2 review records, all valid\n" ""]
+           (verify! dir)))))
+
+(deftest verify-reports-a-key-listed-twice
+  ;; One key binds to one reviewer, so a second line for it binds nothing and
+  ;; is reported, whatever name it gives.
+  (let [dir (scratch-repo!)]
+    (legu! dir "key" "init")
+    (legu! dir "key" "add")
+    (legu! dir "mark" "alpha.txt:1-2")
+    (spit (fs/file dir ".review" "signers") (str (public-key dir) " Someone Else\n")
+          :append true)
+    (is (= 1 (first (verify! dir))))
+    (is (= [{:line 2 :text (str (public-key dir) " Someone Else")
+             :reason "the key is already listed on line 1"}]
+           (:signers-errors (verify-json dir))))
+    (is (= [["alpha.txt" "valid"]] (outcomes dir)))))
+
+(deftest verify-knows-two-keys-under-one-name-and-not-an-unlisted-one
+  ;; A reviewer on two machines lists both keys under one name. Unlist the
+  ;; second and its records can no longer be told from tampering.
+  (let [dir (scratch-repo!)
+        other (scratch-repo!)
+        starts #(mapv (juxt :start :outcome) (:records (verify-json dir)))]
+    (legu! dir "key" "init")
+    (legu! dir "key" "add")
+    (let [first-key (public-key dir)]
+      (legu! dir "mark" "alpha.txt:1-2")
+      (legu! other "key" "init")
+      (doseq [name ["key" "key.pub"]]
+        (fs/copy (key-file other name) (key-file dir name) {:replace-existing true}))
+      (legu! dir "key" "add")
+      (legu! dir "mark" "alpha.txt:4-5")
+      (is (= [0 ""] ((juxt first last) (verify! dir))))
+      (is (= [[1 "valid"] [4 "valid"]] (starts)))
+      (spit (fs/file dir ".review" "signers") (str first-key " " reviewer "\n"))
+      (is (= 1 (first (verify! dir))))
+      (is (= [[1 "valid"] [4 "bad-signature"]] (starts)))
+      (is (= "no key listed for Test Reviewer made this signature"
+             (:reason (second (:records (verify-json dir)))))))))
+
+(deftest an-unreadable-signers-list-is-an-error-not-a-crash
+  (let [dir (scratch-repo!)]
+    (legu! dir "key" "init")
+    (fs/create-dirs (fs/file dir ".review" "signers"))
+    (doseq [args [["verify"] ["mark" "alpha.txt:1-2"]]]
+      (let [{:keys [exit out err]} (apply legu! dir args)]
+        (is (= [1 ""] [exit out]))
+        (is (str/starts-with? err "legu: cannot read .review/signers: "))))))
+
+(deftest reading-commands-still-count-a-record-verify-rejects
+  ;; A flipped signature character leaves every hash the anchoring reads as
+  ;; it was, so only verify can tell.
+  (let [dir (signed-store!)
+        before [(coverage-json dir) (regions-json dir "alpha.txt") (:out (legu! dir "status"))]]
+    (rewrite! (sidecar-file dir "alpha.txt")
+              #(str/replace % #"\"signature\":\"(.)"
+                            (fn [[_ c]] (str "\"signature\":\"" (if (= "A" c) "B" "A")))))
+    (is (= [["alpha.txt" "bad-signature"] ["sub/beta.txt" "valid"]] (outcomes dir)))
+    (is (= 6 (:reviewed (coverage-json dir))))
+    (is (= before [(coverage-json dir) (regions-json dir "alpha.txt") (:out (legu! dir "status"))]))
+    (rewrite! (sidecar-file dir "alpha.txt") strip-signature)
+    (is (= [["alpha.txt" "unsigned"] ["sub/beta.txt" "valid"]] (outcomes dir)))
+    (is (= before [(coverage-json dir) (regions-json dir "alpha.txt") (:out (legu! dir "status"))]))))
+
 ;; ---------------------------------------------------------------- completion
 
 ;; babashka.cli derives these from the same table that parses a command line,
@@ -925,7 +1171,7 @@
 ;; What every drive of completion is checked against, in one place: six copies
 ;; of these lists meant six edits to add a command.
 (def ^:private offered-commands
-  ["mark" "ticket" "forget" "status" "regions" "stale" "next" "coverage" "key"])
+  ["mark" "ticket" "forget" "status" "regions" "stale" "next" "coverage" "key" "verify"])
 
 (def ^:private offered-subcommands {"key" ["init" "show" "add"]})
 
@@ -934,7 +1180,8 @@
   {["next"] ["--limit" "--order" "--help" "--json" "--version"]
    ["status"] ["--gaps" "--help" "--json" "--version"]
    ["mark"] ["--reviewer" "--help" "--json" "--version"]
-   ["key" "init"] ["--help" "--json" "--version"]})
+   ["key" "init"] ["--help" "--json" "--version"]
+   ["verify"] ["--help" "--json" "--version"]})
 
 (def ^:private offered-orders ["dir" "cochange"])
 

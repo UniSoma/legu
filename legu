@@ -269,16 +269,33 @@
 (defn signers-file []
   (fs/file *root* signers-path))
 
+(defn- signers-text
+  "The signers list's text. Dies when the file is there but cannot be read."
+  []
+  (try (slurp (signers-file))
+       (catch Exception e (die (str "cannot read " signers-path ": " (ex-message e))))))
+
+(defn- signers-entries
+  "Every line of a signers list's text but blank lines and lines starting
+   with #, in file order, as {:line :text} with its 1-based line number. A
+   line with a binding's shape, the key, one space, then the name to end of
+   line, also carries :public-key and :reviewer."
+  [text]
+  (keep-indexed
+   (fn [i line]
+     (when-not (or (str/blank? line) (str/starts-with? line "#"))
+       (let [[_ public-key reviewer] (re-matches #"(\S+) (.+)" line)]
+         (cond-> {:line (inc i) :text line}
+           public-key (assoc :public-key public-key :reviewer reviewer)))))
+   (str/split-lines text)))
+
 (defn- parse-signers
   "The bindings in a signers list's text, in file order, as
-   {:public-key :reviewer}: the key, one space, then the name to end of line.
-   Blank lines and lines starting with # are not bindings, and neither is a
-   line of any other shape; reporting those is verify's job."
+   {:public-key :reviewer}. A line of any other shape is skipped; verify
+   reports it."
   [text]
-  (for [line (str/split-lines text)
-        :let [[_ public-key reviewer] (re-matches #"([^\s#]\S*) (.+)" line)]
-        :when public-key]
-    {:public-key public-key :reviewer reviewer}))
+  (for [entry (signers-entries text) :when (:public-key entry)]
+    (select-keys entry [:public-key :reviewer])))
 
 (defn- binding-of
   "The binding for `public-key` in a signers list's text, or nil."
@@ -1072,6 +1089,23 @@
 (defn- ed25519-sign [private-key ^bytes data]
   (.sign (doto (Signature/getInstance "Ed25519") (.initSign private-key) (.update data))))
 
+(defn- ed25519-verify
+  "Whether `signature` is `public-key`'s over `data`. False, not a throw, for
+   64 bytes no key could have made: a signature comes from a sidecar anyone
+   can edit."
+  [public-key ^bytes data ^bytes signature]
+  ;; babashka resolves none of the JDK's security exception classes, so the
+  ;; SignatureException a malformed signature raises is caught as Exception.
+  (try (.verify (doto (Signature/getInstance "Ed25519") (.initVerify public-key) (.update data))
+                signature)
+       (catch Exception _ false)))
+
+(defn- ed25519-public-key
+  "The public key for its 32 raw bytes."
+  [^bytes raw]
+  (.generatePublic (KeyFactory/getInstance "Ed25519")
+                   (X509EncodedKeySpec. (byte-array (concat x509-header raw)))))
+
 (defn- signing-key
   "The private key in key, checked against `public-key`, the half key.pub
    holds: halves from two pairs would sign records verify rejects. Dies when
@@ -1082,19 +1116,15 @@
         seed (try (.decode (Base64/getDecoder) (str/trim (slurp private)))
                   (catch Exception e (unreadable (ex-message e))))
         _ (when-not (= 32 (alength seed)) (unreadable "not a 32-byte seed"))
-        factory (KeyFactory/getInstance "Ed25519")
         private-key (.generatePrivate
-                     factory (PKCS8EncodedKeySpec. (byte-array (concat pkcs8-header seed))))
-        public (try (.generatePublic
-                     factory (X509EncodedKeySpec.
-                              (byte-array (concat x509-header
-                                                  (.decode (Base64/getDecoder) public-key)))))
+                     (KeyFactory/getInstance "Ed25519")
+                     (PKCS8EncodedKeySpec. (byte-array (concat pkcs8-header seed))))
+        public (try (ed25519-public-key (.decode (Base64/getDecoder) public-key))
                     (catch Exception e
                       (die (str "cannot read the public key at " (public-key-file) ": "
                                 (ex-message e)))))
         probe (.getBytes "legu-key-check" "UTF-8")]
-    (when-not (.verify (doto (Signature/getInstance "Ed25519") (.initVerify public) (.update probe))
-                       (ed25519-sign private-key probe))
+    (when-not (ed25519-verify public probe (ed25519-sign private-key probe))
       (die (str "the signing key at " private " is not the private half of "
                 (public-key-file))))
     private-key))
@@ -1114,7 +1144,7 @@
           private (private-key-file)]
       (when-not (fs/exists? private)
         (no-key private))
-      (-> (or (binding-of (slurp (signers-file)) public-key)
+      (-> (or (binding-of (signers-text) public-key)
               (die (str signers-path " does not list the key in " (public-key-file)
                         "; add it with legu key add")))
           (assoc :private-key (signing-key public-key))))))
@@ -1124,6 +1154,75 @@
    base64."
   [record private-key]
   (assoc record :signature (base64 (ed25519-sign private-key (signed-bytes record)))))
+
+(defn- decode-base64
+  "The bytes base64 `s` holds when it is a string holding exactly `n` of
+   them, else nil."
+  [s n]
+  (when (string? s)
+    (when-let [^bytes bs (try (.decode (Base64/getDecoder) ^String s)
+                              (catch IllegalArgumentException _ nil))]
+      (when (= n (alength bs)) bs))))
+
+(defn- listed-public-key
+  "The public key a signers-list line names, or nil when its text is not 32
+   bytes of base64 that decode to an Ed25519 key."
+  [s]
+  (when-let [raw (decode-base64 s 32)]
+    (try (let [public-key (ed25519-public-key raw)]
+           ;; The JDK decodes the point only when a key is put to use, so a
+           ;; bad one would otherwise throw from the first record it checks.
+           (.initVerify (Signature/getInstance "Ed25519") public-key)
+           public-key)
+         (catch Exception _ nil))))
+
+(defn- listed-bindings
+  "The signers list's text as verify reads it: {:bindings :errors}. Each
+   binding is {:reviewer :key} with the key decoded. A line that is not a
+   binding, or whose key is no Ed25519 key, is an error {:line :text :reason}
+   and binds nothing, as does a key listed a second time: one key binds to one
+   reviewer."
+  [text]
+  (reduce (fn [acc {:keys [line text public-key reviewer]}]
+            (let [key (some-> public-key listed-public-key)
+                  error #(update acc :errors conj {:line line :text text :reason %})]
+              (cond
+                (nil? public-key) (error "not a public key, one space, then a name")
+                (nil? key) (error "not a 32-byte Ed25519 public key in base64")
+                (get-in acc [:lines public-key])
+                (error (str "the key is already listed on line "
+                            (get-in acc [:lines public-key])))
+                :else (-> acc
+                          (update :bindings conj {:reviewer reviewer :key key})
+                          (assoc-in [:lines public-key] line)))))
+          {:bindings [] :errors [] :lines {}}
+          (signers-entries text)))
+
+(defn- verify-outcome
+  "[outcome reason] for a review record checked against `bindings`
+   (ADR-0016). The record names no key and Ed25519 cannot say which key made
+   a signature, so the reviewer's own keys are tried first and then every
+   other: a key that verifies under another name is a name-mismatch, and no
+   key verifying is a bad-signature when the reviewer has a listed key and an
+   unlisted-signer when not."
+  [bindings {:keys [reviewer] :as record}]
+  (if-not (contains? record :signature)
+    ["unsigned" "no signature in a signed store"]
+    (if-let [signature (decode-base64 (:signature record) 64)]
+      (let [data (signed-bytes record)
+            binding (->> (sort-by #(not= reviewer (:reviewer %)) bindings)
+                        (filter #(ed25519-verify (:key %) data signature))
+                        first)
+            ;; A hand-edited reviewer may be any JSON value, null included.
+            named (if (string? reviewer) reviewer (json/generate-string reviewer))]
+        (cond
+          (and (nil? binding) (some #(= reviewer (:reviewer %)) bindings))
+          ["bad-signature" (str "no key listed for " named " made this signature")]
+          (nil? binding) ["unlisted-signer" (str signers-path " lists no key for " named)]
+          (= reviewer (:reviewer binding)) ["valid" nil]
+          :else ["name-mismatch" (str "signed by the key " signers-path " lists for "
+                                      (:reviewer binding))]))
+      ["bad-signature" "the signature is not 64 bytes of base64"])))
 
 (defn- signers-line [{:keys [public-key reviewer]}]
   (str public-key " " reviewer))
@@ -1141,7 +1240,7 @@
   [{:keys [opts]}]
   (let [{:keys [public-key reviewer] :as binding} (local-binding)
         f (signers-file)
-        text (if (fs/exists? f) (slurp f) "")
+        text (if (fs/exists? f) (signers-text) "")
         listed (binding-of text public-key)]
     (when (and listed (not= reviewer (:reviewer listed)))
       (die (str signers-path " already lists this key as " (:reviewer listed))))
@@ -1675,6 +1774,54 @@
                                 :unreviewed unr :reviewed rev :stale stl}
                                nil))))))
 
+(defn- render-verify [{:keys [records signers-errors errors]}]
+  (doseq [{:keys [line text reason]} signers-errors]
+    (println (format "%s:%d  %s  (%s)" signers-path line text reason)))
+  (let [failed (remove #(= "valid" (:outcome %)) records)
+        n (count records)
+        plural (fn [k one many] (str k " " (if (= 1 k) one many)))]
+    (doseq [r failed]
+      (println (format "%s  %s%s  %s  %s  (%s)"
+                       (:file r) (:path r) (fmt-region r) (:reviewer r) (:outcome r) (:reason r))))
+    (println (str (plural n "review record" "review records") ", "
+                  (if (empty? failed) "all valid" (str (count failed) " not valid"))
+                  (when (seq signers-errors)
+                    (str "; " (plural (count signers-errors)
+                                      (str "line of " signers-path " does not parse")
+                                      (str "lines of " signers-path " do not parse"))))
+                  (when (seq errors)
+                    (str "; " (plural (count errors) "sidecar could not be read"
+                                      "sidecars could not be read")))))))
+
+(defn cmd-verify
+  "Verifies every review record under the path, or in the whole store, against
+   the signers list (ADR-0016), and exits 1 after reporting when a record is
+   not valid, a sidecar cannot be read or a signers-list line does not parse.
+   Reads no local key. In an unsigned store there is nothing to verify."
+  [{:keys [opts]}]
+  (if-not (fs/exists? (signers-file))
+    (emit opts {:signed false :records [] :signers-errors []}
+          (fn [_] (println (str "the store is not signed: there is no " signers-path))))
+    (let [prefix (some-> (:path opts) (str/replace #"/$" "") rel-path)
+          {:keys [bindings errors]} (listed-bindings (signers-text))
+          ;; Scoped before read-state, which records every sidecar it cannot
+          ;; read, so that one outside the path does not fail the run.
+          records (vec (for [path (stored-paths)
+                             :when (under? path prefix)
+                             record (:regions (read-state path))
+                             :let [[outcome reason] (verify-outcome bindings record)]]
+                         (cond-> {:file (store-path path) :path path}
+                           (:start record) (assoc :start (:start record) :end (:end record))
+                           :always (assoc :reviewer (:reviewer record)
+                                          :outcome outcome :reason reason))))
+          failed (or (some #(not= "valid" (:outcome %)) records)
+                     (seq errors)
+                     (seq @store-errors))]
+      (emit opts {:signed true :records records :signers-errors errors} render-verify)
+      (when failed
+        (flush)
+        (System/exit 1)))))
+
 ;; ---------------------------------------------------------------- cli
 
 (def options
@@ -1727,7 +1874,9 @@
    {:cmds ["key" "show"] :run cmd-key-show :arguments []
     :doc "print the signers-list line for the signing key"}
    {:cmds ["key" "add"] :run cmd-key-add :arguments []
-    :doc "add the signing key to the store's signers list"}])
+    :doc "add the signing key to the store's signers list"}
+   {:cmds ["verify"] :run cmd-verify :arguments [:path] :optional #{:path}
+    :doc "report each review record whose signature does not hold"}])
 
 (def argument-specs
   "What each argument is called in help and what its value must satisfy. The
