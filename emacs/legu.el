@@ -319,8 +319,8 @@ of another schema still reads, so the caller can say which schema it met."
             (cons 'tickets (nreverse tickets))))))
 
 (defun legu-sidecar-file (root relpath)
-  "Absolute path of the sidecar recording RELPATH under ROOT."
-  (expand-file-name (concat ".review/" relpath ".jsonl") root))
+  "Absolute path of the sidecar recording RELPATH under ROOT (ADR-0017)."
+  (expand-file-name (concat ".review/sidecars/" relpath ".jsonl") root))
 
 (defconst legu-sidecar-schema 3
   "The sidecar schema this package reads, the one the CLI writes.")
@@ -1852,8 +1852,8 @@ CLI can see is no longer the file on screen."
 
 (defun legu--watch-store (root)
   "Watch ROOT's .review tree, so other people's marks show up.
-File notification is not recursive, and the store mirrors the source
-tree, so every directory in it needs its own watch -- and new ones have
+File notification is not recursive, and the sidecars mirror the source
+tree, so every directory in the store needs its own watch -- and new ones have
 to be picked up as they are created."
   (when (and legu-watch-store
              (file-directory-p (expand-file-name ".review" root)))

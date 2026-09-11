@@ -106,12 +106,14 @@ _Avoid_: progress, completion, score
 
 **Store**:
 The `.review/` directory at the repo root, committed alongside the code. It
-holds everything legu owns: the sidecars, the ignore list and the signers list.
+holds everything legu owns: the sidecars under `.review/sidecars/`, the ignore
+list at `.review/ignore` and the signers list at `.review/signers`.
 _Avoid_: database, index, cache
 
 **Sidecar**:
 One file in the store, holding the review records and ticket references of one
-source file. The sidecars mirror the source tree, one per file.
+source file. The sidecars mirror the source tree under `.review/sidecars/`, one
+per file.
 _Avoid_: state file, metadata file
 
 ### Signing

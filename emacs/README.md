@@ -137,10 +137,11 @@ ticket references at point. A buffer edit or a newer describe request discards
 an older asynchronous answer.
 
 1. **The sidecar and a file hash.** Opening a file reads
-   `.review/<path>.jsonl` and hashes the file — no subprocess at all. A record
-   whose stored `file-hash` still matches is exactly the case the CLI's own
-   anchoring answers immediately, so it can be painted with no process. A file
-   whose every record matches this way is the one case that runs nothing else.
+   `.review/sidecars/<path>.jsonl` and hashes the file — no subprocess at
+   all. A record whose stored `file-hash` still matches is exactly the case the
+   CLI's own anchoring answers immediately, so it can be painted with no
+   process. A file whose every record matches this way is the one case that
+   runs nothing else.
 2. **A per-file query.** When the sidecar at the file's current path cannot
    account for it — there is none, or a record's hash no longer matches — and
    no trusted snapshot already covers it, one `legu regions <path> --json`

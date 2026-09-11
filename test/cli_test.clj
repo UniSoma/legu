@@ -38,6 +38,14 @@
     (when-not (zero? exit)
       (throw (ex-info (str "git " (str/join " " args) " failed: " err) {})))))
 
+(defn- write-files!
+  "Writes each path to content under dir, creating parent directories."
+  [dir files]
+  (doseq [[path content] files]
+    (let [f (fs/file dir path)]
+      (fs/create-dirs (fs/parent f))
+      (spit f content))))
+
 (defn- scratch-repo!
   "Creates a committed git tree in a fresh temp directory and returns its path.
    The reviewer, the file contents and the commit dates are fixed, so nothing
@@ -45,10 +53,7 @@
   []
   (let [dir (str (fs/create-temp-dir {:prefix "legu-cli-test"}))]
     (swap! scratch-dirs conj dir)
-    (doseq [[path content] fixture]
-      (let [f (fs/file dir path)]
-        (fs/create-dirs (fs/parent f))
-        (spit f content)))
+    (write-files! dir fixture)
     (git! dir "init" "-q")
     (git! dir "config" "user.name" reviewer)
     (git! dir "config" "user.email" "reviewer@example.test")
@@ -366,10 +371,19 @@
 ;; header line, then one JSON object per record in a fixed key order with no
 ;; whitespace. These cases read the file a command left behind.
 
+(defn- sidecar-rel
+  "Where `path`'s sidecar lives relative to the repo root, as legu names it in
+   messages and `errors`. ADR-0017 puts the sidecars one level down the store."
+  [path]
+  (str ".review/sidecars/" path ".jsonl"))
+
+(defn- sidecar-file [dir path]
+  (fs/file dir (sidecar-rel path)))
+
 (defn- sidecar-lines
   "The lines of `path`'s sidecar under dir, or nil when there is none."
   [dir path]
-  (let [f (fs/file dir ".review" (str path ".jsonl"))]
+  (let [f (sidecar-file dir path)]
     (when (fs/exists? f) (str/split-lines (slurp f)))))
 
 (defn- sha256 [^String s]
@@ -444,7 +458,7 @@
     (is (nil? (sidecar-lines dir "alpha.txt")))))
 
 (defn- write-sidecar! [dir path text]
-  (let [f (fs/file dir ".review" (str path ".jsonl"))]
+  (let [f (sidecar-file dir path)]
     (fs/create-dirs (fs/parent f))
     (spit f text)))
 
@@ -454,14 +468,14 @@
    sidecar's bytes are what they were. Returns the write's stderr, for the
    caller to check the reason."
   [dir path]
-  (let [f (fs/file dir ".review" (str path ".jsonl"))
+  (let [f (sidecar-file dir path)
         bytes (slurp f)
         {:keys [exit out err]} (legu! dir "mark" (str path ":1-1") "--reviewer" reviewer)]
     (is (= [1 ""] [exit out]))
     (is (str/starts-with? err (str "legu: cannot read " f ": ")) err)
     (let [{:keys [exit out]} (legu! dir "status" "--json")]
       (is (= 0 exit))
-      (is (str/includes? out (str "\"file\" : \".review/" path ".jsonl\""))))
+      (is (str/includes? out (str "\"file\" : \"" (sidecar-rel path) "\""))))
     (is (= bytes (slurp f)))
     err))
 
@@ -516,10 +530,10 @@
       (let [{:keys [exit out err]} (apply legu! dir (conj args "--json"))]
         (is (= 0 exit) (pr-str args))
         (is (= (for [path broken]
-                 (str "legu: cannot read " (fs/file dir ".review" (str path ".jsonl")) ": " reason))
+                 (str "legu: cannot read " (sidecar-file dir path) ": " reason))
                (str/split-lines err))
             (pr-str args))
-        (is (= (for [path broken] {:file (str ".review/" path ".jsonl") :reason reason})
+        (is (= (for [path broken] {:file (sidecar-rel path) :reason reason})
                (:errors (json/parse-string out true)))
             (pr-str args))))))
 
@@ -530,6 +544,61 @@
     (is (str/includes? (refuses-the-sidecar dir "alpha.txt") "not a review record"))
     (write-sidecar! dir "alpha.txt" "{\"schema\":3}\n[1,2,3]\n")
     (is (str/includes? (refuses-the-sidecar dir "alpha.txt") "not a review record"))))
+
+;; ---------------------------------------------------------------- store layout
+
+;; ADR-0017: the store holds everything legu owns. The sidecars mirror the
+;; source tree under sidecars/, and the ignore list sits at the store's root.
+
+(defn- commit! [dir files]
+  (write-files! dir files)
+  (apply git! dir "add" "--" (keys files))
+  (git! dir "commit" "-qm" "layout"))
+
+(defn- regions-json [dir path]
+  (json/parse-string (:out (legu! dir "regions" path "--json")) true))
+
+(defn- coverage-json [dir]
+  (json/parse-string (:out (legu! dir "coverage" "--json")) true))
+
+(deftest a-mark-writes-its-sidecar-under-the-sidecars-directory
+  (let [dir (scratch-repo!)]
+    (is (= 0 (:exit (legu! dir "mark" "alpha.txt:1-2" "--reviewer" reviewer))))
+    (is (= 0 (:exit (legu! dir "mark" "sub/beta.txt" "--reviewer" reviewer))))
+    (is (fs/regular-file? (fs/file dir ".review/sidecars/alpha.txt.jsonl")))
+    (is (fs/regular-file? (fs/file dir ".review/sidecars/sub/beta.txt.jsonl")))
+    (is (not (fs/exists? (fs/file dir ".review/alpha.txt.jsonl"))))
+    (is (= [[1 2]] (map (juxt :start :end) (:regions (regions-json dir "alpha.txt")))))))
+
+(deftest the-ignore-list-is-read-from-the-store
+  (let [dir (scratch-repo!)]
+    (commit! dir {".review/ignore" "sub/\n"})
+    (let [beta (regions-json dir "sub/beta.txt")]
+      (is (= [false "excluded by .review/ignore"]
+             [(:eligible beta) (:exclusion-reason beta)])))
+    ;; The fixture's 12 lines less beta's 3.
+    (is (= 9 (:eligible-lines (coverage-json dir))))
+    (let [{:keys [exit err]} (legu! dir "mark" "sub/beta.txt" "--reviewer" reviewer)]
+      (is (= 0 exit))
+      (is (= (str "legu: sub/beta.txt is excluded by .review/ignore"
+                  " and will not count toward coverage\n")
+             err)))))
+
+(deftest a-reviewignore-at-the-repo-root-is-an-ordinary-file
+  (let [dir (scratch-repo!)]
+    (commit! dir {".reviewignore" "sub/\n"})
+    (is (:eligible (regions-json dir "sub/beta.txt")))
+    (is (:eligible (regions-json dir ".reviewignore")))))
+
+(deftest a-file-at-the-stores-root-is-never-eligible
+  (let [dir (scratch-repo!)]
+    (commit! dir {".review/ignore" "# nothing ignored\n"
+                  ".review/notes.txt" "not a sidecar\n"})
+    (doseq [path [".review/ignore" ".review/notes.txt"]]
+      (let [data (regions-json dir path)]
+        (is (= [false "legu metadata"] [(:eligible data) (:exclusion-reason data)])
+            path)))
+    (is (= 12 (:eligible-lines (coverage-json dir))))))
 
 ;; ---------------------------------------------------------------- completion
 

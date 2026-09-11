@@ -101,22 +101,23 @@
   (or @tracked-cache (reset! tracked-cache (set (tracked-files)))))
 
 (defn ignored-files
-  "Tracked files matching .reviewignore. Gitignore syntax, matched by git itself."
+  "Tracked files matching the store's ignore list, .review/ignore (ADR-0017).
+   Gitignore syntax, matched by git itself."
   []
-  (let [f (fs/file *root* ".reviewignore")]
+  (let [f (fs/file *root* ".review" "ignore")]
     (cond
       (not (fs/exists? f)) #{}
 
       (not *git?*)
       (do (binding [*out* *err*]
-            (println "legu: .reviewignore needs git to match; every file counts as eligible"))
+            (println "legu: .review/ignore needs git to match; every file counts as eligible"))
           #{})
 
       :else
       (let [{:keys [exit out err]} (git "ls-files" "-c" "-i" "-z"
                                         (str "--exclude-from=" (str f)))]
         (when-not (zero? exit)
-          (die (str "cannot apply .reviewignore: " (str/trim (or err "")))))
+          (die (str "cannot apply .review/ignore: " (str/trim (or err "")))))
         (set (split-z out))))))
 
 (defn- name-status
@@ -246,9 +247,14 @@
 ;; ---------------------------------------------------------------- store
 
 (defn store-path
-  "Where `path`'s sidecar lives, relative to the repo root."
+  "Where `path`'s sidecar lives, relative to the repo root (ADR-0017)."
   [path]
-  (str ".review/" path ".jsonl"))
+  (str ".review/sidecars/" path ".jsonl"))
+
+(defn in-store?
+  "Whether the repo-relative `path` is one of legu's own files under .review/."
+  [path]
+  (str/starts-with? path ".review/"))
 
 (defn store-file [path]
   (fs/file *root* (store-path path)))
@@ -413,7 +419,7 @@
     state))
 
 (defn- store-listing []
-  (let [dir (fs/file *root* ".review")]
+  (let [dir (fs/file *root* ".review" "sidecars")]
     (if (fs/exists? dir)
       (->> (fs/glob dir "**.jsonl" {:hidden true})
            (filter fs/regular-file?)
@@ -729,7 +735,7 @@
   (->> (fs/glob (fs/path *root*) "**" {:hidden true})
        (filter fs/regular-file?)
        (map #(str (fs/relativize (fs/path *root*) %)))
-       (remove #(or (re-find #"(^|/)\.git/" %) (str/starts-with? % ".review/")))
+       (remove #(or (re-find #"(^|/)\.git/" %) (in-store? %)))
        sort vec))
 
 (defn skipped-paths
@@ -750,8 +756,7 @@
     (vec (for [p all
                :when (and (not (ignored p))
                           (not (skipped p))
-                          (not (str/starts-with? p ".review/"))
-                          (not= p ".reviewignore"))]
+                          (not (in-store? p)))]
            (let [c (read-worktree p)]
              ;; an opaque region is one line to read, whether binary or empty
              {:path p
@@ -1055,7 +1060,7 @@
           record (assoc (evidence-of region) :reviewer (reviewer opts))]
       (save-state! (update state :regions #(conj (vec %) record)))
       (when-let [why (cond
-                       ((ignored-files) path) "is excluded by .reviewignore"
+                       ((ignored-files) path) "is excluded by .review/ignore"
                        (and *git?* (not ((tracked-set) path))) "is not tracked by git")]
         (binding [*out* *err*]
           (println (str "legu: " path " " why " and will not count toward coverage"))))
@@ -1161,9 +1166,8 @@
 
 (defn- path-eligibility [path ignored]
   (cond
-    (= path ".reviewignore") [false "legu metadata"]
-    (str/starts-with? path ".review/") [false "legu metadata"]
-    (ignored path) [false "excluded by .reviewignore"]
+    (in-store? path) [false "legu metadata"]
+    (ignored path) [false "excluded by .review/ignore"]
     (and *git?* (not ((tracked-set) path))) [false "not tracked by git"]
     :else [true nil]))
 

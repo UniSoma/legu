@@ -1,27 +1,28 @@
 ---
 id: lgu-01m28tewtjn0
 title: Move everything legu owns under .review
-status: open
+status: closed
 type: chore
 priority: 2
 mode: afk
 created: '2026-09-11T18:07:45.490878027Z'
-updated: '2026-09-11T18:07:45.490878027Z'
+updated: '2026-09-11T18:40:00.254307164Z'
+closed: '2026-09-11T18:40:00.254307164Z'
 parent: lgu-01m28sh82tk1
 tags:
 - ready-for-agent
 - signing
 acceptance:
 - title: Sidecars are read and written under .review/sidecars/, mirroring the source tree
-  done: false
+  done: true
 - title: The ignore list is read from .review/ignore and .reviewignore is no longer consulted
-  done: false
+  done: true
 - title: .gitattributes marks only .review/sidecars/** generated
-  done: false
+  done: true
 - title: Emacs derives sidecar paths from the new location; ERT and the CLI suite pass
-  done: false
+  done: true
 - title: README, Emacs README and CONTEXT.md name the new locations; the repo's own store is moved
-  done: false
+  done: true
 ---
 
 ## Description
@@ -35,3 +36,9 @@ The store becomes the one directory for everything legu owns. Sidecars move from
 ### Blocked by
 
 None (can start immediately).
+
+## Notes
+
+**2026-09-11T18:40:00.254307164Z**
+
+Sidecars now live under .review/sidecars/<path>.jsonl and the ignore list is read from .review/ignore; .reviewignore is no longer consulted and counts as an ordinary file. .gitattributes marks only .review/sidecars/** generated. The Emacs package derives the same path. The repo had no committed store, so moving it came down to the .gitattributes rule.

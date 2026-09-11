@@ -140,7 +140,7 @@ parse is not skipped, since the lines a merge conflict wraps are records."
 
 (ert-deftest legu-test-sidecar-schema-gate ()
   (let* ((dir (make-temp-file "legu-test" t))
-         (side (expand-file-name ".review/a.txt.jsonl" dir)))
+         (side (expand-file-name ".review/sidecars/a.txt.jsonl" dir)))
     (unwind-protect
         (progn
           (make-directory (file-name-directory side) t)
@@ -364,7 +364,7 @@ parse is not skipped, since the lines a merge conflict wraps are records."
       ;; A broken sidecar flags the store without taking the numbers away.
       (puthash "/tmp/x/" (list :coverage (list :lines 1000 :reviewed 618 :stale 20
                                                :never 362 :files 5)
-                               :errors (list (list :file ".review/b.txt.jsonl"
+                               :errors (list (list :file ".review/sidecars/b.txt.jsonl"
                                                    :reason "not a review record")))
                legu--snapshots)
       (should (equal (substring-no-properties (legu--lighter)) " legu 61%!"))
@@ -376,7 +376,7 @@ parse is not skipped, since the lines a merge conflict wraps are records."
     (puthash "/tmp/x/"
              (list :state 'fresh :started (current-time)
                    :coverage (list :lines 10 :reviewed 5 :stale 0 :never 5 :files 1)
-                   :errors (list (list :file ".review/b.txt.jsonl"
+                   :errors (list (list :file ".review/sidecars/b.txt.jsonl"
                                        :reason "not a review record")))
              legu--snapshots)
     (with-temp-buffer
@@ -384,7 +384,7 @@ parse is not skipped, since the lines a merge conflict wraps are records."
       (setq legu-list--root "/tmp/x/")
       (legu-list--render)
       (let ((text (substring-no-properties (buffer-string))))
-        (should (string-match-p "\\.review/b\\.txt\\.jsonl" text))
+        (should (string-match-p "\\.review/sidecars/b\\.txt\\.jsonl" text))
         (should (string-match-p "not a review record" text))
         ;; The numbers next to it are this snapshot's, not the last good one's.
         (should (string-match-p "reviewed +5" text))
@@ -435,7 +435,7 @@ parse is not skipped, since the lines a merge conflict wraps are records."
     (puthash "/tmp/x/"
              (list :state 'error :started (current-time)
                    :error (list :kind 'cli-failed :message "legu: git not found")
-                   :errors (list (list :file ".review/b.txt.jsonl" :reason "stale")))
+                   :errors (list (list :file ".review/sidecars/b.txt.jsonl" :reason "stale")))
              legu--snapshots)
     (with-temp-buffer
       (legu-list-mode)
@@ -963,7 +963,7 @@ record counts only where no reviewed one covers it, and the ranges
 
 (defun legu-test--break-sidecar (root path)
   "Overwrite PATH's sidecar under ROOT with an unmerged conflict."
-  (with-temp-file (expand-file-name (concat ".review/" path ".jsonl") root)
+  (with-temp-file (expand-file-name (concat ".review/sidecars/" path ".jsonl") root)
     (insert "<<<<<<< HEAD\n{\"schema\":3}\n=======\nnonsense\n>>>>>>> other\n")))
 
 (ert-deftest legu-test-integration-one-broken-sidecar-does-not-down-the-cli ()
@@ -993,7 +993,7 @@ record counts only where no reviewed one covers it, and the ranges
       (should-not (seq-find (lambda (f) (equal "b.txt" (alist-get 'path f)))
                             (alist-get 'files data)))
       ;; Root-relative, once per file however many times it was loaded.
-      (should (equal '(".review/b.txt.jsonl")
+      (should (equal '(".review/sidecars/b.txt.jsonl")
                      (mapcar (lambda (e) (alist-get 'file e)) errors)))
       (should (stringp (alist-get 'reason (car errors)))))
     (let ((cov (legu--parse-json (nth 1 (legu-test--legu "coverage" "--json")))))
@@ -1012,7 +1012,7 @@ record counts only where no reviewed one covers it, and the ranges
     (should (legu-test--wait
              (lambda () (plist-get (legu-snapshot root) :errors))))
     (should (eq 'fresh (plist-get (legu-snapshot root) :state)))
-    (should (equal '(".review/b.txt.jsonl")
+    (should (equal '(".review/sidecars/b.txt.jsonl")
                    (mapcar (lambda (e) (plist-get e :file))
                            (plist-get (legu-snapshot root) :errors))))
     (should (= 5 (plist-get (legu-coverage-numbers root) :reviewed)))))
@@ -1025,7 +1025,7 @@ record counts only where no reviewed one covers it, and the ranges
     (legu-test--legu "mark" "a.txt:1-5")
     (legu-test--legu "mark" "b.txt:1-5")
     (legu-test--break-sidecar root "b.txt")
-    (let* ((sidecar (expand-file-name ".review/b.txt.jsonl" root))
+    (let* ((sidecar (expand-file-name ".review/sidecars/b.txt.jsonl" root))
            (bytes (with-temp-buffer (insert-file-contents sidecar) (buffer-string))))
       (dolist (args '(("mark" "b.txt:6-8")
                       ("ticket" "b.txt:6-8" "T-1")
@@ -1292,8 +1292,9 @@ no evidence that the region moved."
   (legu-test--with-repo (list (cons "empty.txt" "")
                               (cons "binary.dat" (concat "a" (unibyte-string 0) "b"))
                               (cons "ignored.txt" "ignored\n"))
-    (with-temp-file ".reviewignore" (insert "ignored.txt\n"))
-    (legu-test--git "add" ".reviewignore")
+    (make-directory ".review" t)
+    (with-temp-file ".review/ignore" (insert "ignored.txt\n"))
+    (legu-test--git "add" ".review/ignore")
     (legu-test--legu "mark" "empty.txt")
     (legu-test--legu "mark" "binary.dat")
     (legu-test--legu "mark" "ignored.txt")
@@ -1310,7 +1311,7 @@ no evidence that the region moved."
     (let ((ignored (legu-test--regions "ignored.txt"))
           (untracked (legu-test--regions "untracked.txt")))
       (should-not (alist-get 'eligible ignored))
-      (should (equal "excluded by .reviewignore" (alist-get 'exclusion-reason ignored)))
+      (should (equal "excluded by .review/ignore" (alist-get 'exclusion-reason ignored)))
       (should-not (alist-get 'eligible untracked))
       (should (equal "not tracked by git" (alist-get 'exclusion-reason untracked))))))
 
@@ -1323,7 +1324,7 @@ no evidence that the region moved."
       (should (= 0 (nth 0 result)))
       (should-not (alist-get 'complete data))
       (should-not (alist-get 'regions data))
-      (should (equal ".review/a.txt.jsonl"
+      (should (equal ".review/sidecars/a.txt.jsonl"
                      (alist-get 'file (car (alist-get 'errors data)))))
       (should (string-match-p "cannot read" (nth 2 result))))
     (let ((human (legu-test--legu "regions" "a.txt")))
@@ -1584,7 +1585,7 @@ git, the CLI or `legu-mode'."
 
 (ert-deftest legu-test-per-file-query-is-not-run-for-a-confirming-sidecar ()
   (legu-test--with-file 20
-    (let ((sidecar (expand-file-name ".review/b.txt.jsonl" root)))
+    (let ((sidecar (expand-file-name ".review/sidecars/b.txt.jsonl" root)))
       (make-directory (file-name-directory sidecar) t)
       (with-temp-file sidecar
         (insert (format "{\"schema\":3}\n{\"start\":1,\"end\":10,\"reviewer\":\"r\",\"file-hash\":\"%s\"}\n"
@@ -1702,7 +1703,7 @@ git, the CLI or `legu-mode'."
 
 (ert-deftest legu-test-a-sidecar-that-is-a-directory-is-not-an-error ()
   (let* ((dir (make-temp-file "legu-test" t))
-         (side (expand-file-name ".review/a.txt.jsonl" dir)))
+         (side (expand-file-name ".review/sidecars/a.txt.jsonl" dir)))
     (unwind-protect
         (progn
           (make-directory side t)
@@ -2200,7 +2201,7 @@ PATHS are relative to `default-directory'."
 (defun legu-test--numstat (path)
   "Lines added and deleted in PATH's sidecar since HEAD, as (ADDED . DELETED)."
   (with-temp-buffer
-    (call-process "git" nil t nil "diff" "--numstat" "--" (concat ".review/" path ".jsonl"))
+    (call-process "git" nil t nil "diff" "--numstat" "--" (concat ".review/sidecars/" path ".jsonl"))
     (goto-char (point-min))
     (if (looking-at "\\([0-9]+\\)\t\\([0-9]+\\)")
         (cons (string-to-number (match-string 1)) (string-to-number (match-string 2)))
@@ -2299,7 +2300,7 @@ is visible, not so it is wanted."
     ;; The conflict is explicit to legu too: named, and never written over.
     (let ((result (legu-test--legu "status" "--json")))
       (should (= 0 (nth 0 result)))
-      (should (equal ".review/a.txt.jsonl"
+      (should (equal ".review/sidecars/a.txt.jsonl"
                      (alist-get 'file (car (alist-get 'errors
                                                       (legu--parse-json (nth 1 result))))))))
     (should (/= 0 (nth 0 (legu-test--legu "mark" "a.txt:20-25"))))))

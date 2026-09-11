@@ -1,3 +1,4 @@
 # Sidecars are legu's, one JSON line per record (ADR-0015). Marking them
-# generated collapses them in GitHub and GitLab review views.
-.review/** linguist-generated=true gitlab-generated=true
+# generated collapses them in GitHub and GitLab review views. Files at the
+# store's root, the ignore list and the signers list, stay in full (ADR-0017).
+.review/sidecars/** linguist-generated=true gitlab-generated=true

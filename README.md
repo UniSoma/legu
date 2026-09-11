@@ -264,9 +264,12 @@ Doom users are supported out of the box. See
 
 ## Storage
 
-`.review/` at the repo root, one JSON Lines file per source file
-(`.review/<path>.jsonl`), mirroring the source tree — committed alongside the
-code. Source files are never modified.
+The store is `.review/` at the repo root, committed alongside the code. It
+holds everything legu owns: one JSON Lines sidecar per source file under
+`.review/sidecars/`, mirroring the source tree (`.review/sidecars/<path>.jsonl`),
+and the ignore list at `.review/ignore`
+([ADR-0017](docs/adr/0017-everything-legu-owns-lives-under-the-store.md)).
+Source files are never modified.
 
 ```jsonl
 {"schema":3}
@@ -288,8 +291,9 @@ stored: the sidecar's own location says it. An opaque record has no line range
 and no content hash, only `"opaque":true` and the file hash. A sidecar with
 nothing left in it is removed. Sidecars of any other schema are refused, not
 migrated ([ADR-0015](docs/adr/0015-jsonl-sidecars-one-record-per-line.md)).
-The committed `.gitattributes` marks `.review/**` as generated, which collapses
-sidecars in GitHub and GitLab review views.
+The committed `.gitattributes` marks `.review/sidecars/**` as generated, which
+collapses sidecars in GitHub and GitLab review views. Files at the store's root,
+such as the ignore list, show in full.
 
 legu skips a sidecar it cannot parse — most often one with a merge conflict
 left in it — instead of dying on it. One line that does not parse makes the
@@ -301,7 +305,7 @@ skipped on stderr and adds an `errors` key to its `--json`:
 
 ```json
 {"files": [...], "tickets": [...],
- "errors": [{"file": ".review/src/core.clj.jsonl",
+ "errors": [{"file": ".review/sidecars/src/core.clj.jsonl",
              "reason": "not a review record"}]}
 ```
 
@@ -320,10 +324,11 @@ file hash alone.
 
 `legu coverage` prints the three numbers over eligible lines — unreviewed,
 reviewed, stale — as three rows on one bar scale, which is the block `legu status`
-opens with. It counts every tracked file except those matching `.reviewignore`
-at the repo root — vendored code, generated files, lockfiles, fixtures.
-`.reviewignore` uses gitignore syntax, and git itself does the matching, so
-negations and directory patterns behave exactly as you expect.
+opens with. It counts every tracked file except the store's own files and
+those matching the ignore list, `.review/ignore`: vendored code, generated
+files, lockfiles, fixtures. The ignore list uses gitignore syntax, and git
+itself does the matching, so negations and directory patterns behave exactly
+as you expect.
 
 Binary files (detected by a NUL byte in the first 8 KB) and empty files count
 as one line each.
@@ -342,7 +347,7 @@ legu still runs without git, so a directory that is not a repository can be
 tracked by content hash alone. Three things change: the repo root becomes the
 nearest ancestor holding a `.review/` directory (so subdirectories share one
 store), the eligible set becomes a walk of the working tree rather than
-`git ls-files`, and **`.reviewignore` is inert** — the gitignore matching is
+`git ls-files`, and **`.review/ignore` is inert** — the gitignore matching is
 git's, not ours.
 
 ## Decisions
@@ -384,7 +389,7 @@ The Emacs package has its own ERT suite, documented under
 - A binary file that is renamed *and* rewritten reports `missing`: git has no
   similarity left to match on, so neither has legu.
 - Paths containing a newline are rejected; they cannot round-trip the store.
-- Marks on files excluded by `.reviewignore`, or on untracked files, are stored
+- Marks on files excluded by `.review/ignore`, or on untracked files, are stored
   and warned about, but do not count toward coverage.
 - A mark cannot retire a record held in a sidecar it could not read, so that
   record survives as a ghost until the sidecar is fixed. The mark still lands,
