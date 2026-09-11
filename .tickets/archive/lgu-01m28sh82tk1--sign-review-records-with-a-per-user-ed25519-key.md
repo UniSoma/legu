@@ -1,12 +1,13 @@
 ---
 id: lgu-01m28sh82tk1
 title: Sign review records with a per-user Ed25519 key
-status: open
+status: closed
 type: feature
 priority: 2
 mode: afk
 created: '2026-09-11T17:51:33.978416771Z'
-updated: '2026-09-11T17:51:33.978416771Z'
+updated: '2026-09-11T20:05:57.424802139Z'
+closed: '2026-09-11T20:05:57.424802139Z'
 tags:
 - ready-for-agent
 - signing
@@ -107,3 +108,9 @@ This implements [ADR-0016](../docs/adr/0016-signed-review-records.md); the terms
 The signature says who marked, not who read. Nothing in this design changes that.
 
 The signers list is the trust root and the switch. A repo that lists keys but has records from before the list existed will see them reported as `unsigned` by verify; re-marking those regions is the way to sign them.
+
+## Notes
+
+**2026-09-11T20:05:57.424802139Z**
+
+Signed review records landed in four slices: the store moved under .review (56a7400), legu key init/show/add (a8d0138), signed marks at sidecar schema 4 (02e9cfc), and legu verify (f9178cb). A store with .review/signers is signed; every mark in it carries an Ed25519 signature over the documented bytes, and verify reports every record whose signature does not hold.
