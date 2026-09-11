@@ -111,8 +111,8 @@ a hash of the whole file, and a hash of the region's *normalized* content — ea
 line stripped of leading and trailing whitespace, and nothing more aggressive
 than that. A mark also retires every earlier record that now anchors fully
 inside the marked range, so re-reading a stale region at the range it now
-anchors to leaves one record, not two. A record the mark only partly covers stays: the
-part outside was not re-read
+anchors to leaves one record, not two. A record the mark only partly covers
+stays: the part outside was not re-read
 ([ADR-0013](docs/adr/0013-a-mark-supersedes-only-what-it-contains.md)).
 
 To decide a region's current state, legu:
@@ -543,6 +543,9 @@ snippet in its `.zshrc` and is sent a real TAB, bash sources the snippet and is
 asked what it would have offered, and fish is asked through `complete -C`
 against the file the section above installs. A shell that is missing fails the
 suite rather than passing quietly, since completion is then unchecked.
+
+`bb test` runs this suite and the Emacs one, and `bb lint` runs clj-kondo and
+checks that prose stays within 85 columns.
 
 The Emacs package has its own ERT suite, documented under
 [emacs/README.md](emacs/README.md#tests).

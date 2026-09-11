@@ -1,0 +1,36 @@
+{:min-bb-version "1.13.220"
+ :tasks
+ {:requires ([clojure.string :as str])
+  :init (defn wide-lines
+          "Lines of prose in file wider than width columns, as file:line
+           strings. Code blocks and table rows are exempt."
+          [file width]
+          (loop [[line & more :as lines] (str/split-lines (slurp file)) n 1 fence false acc []]
+            (if (empty? lines)
+              acc
+              (let [toggle (str/starts-with? line "```")]
+                (recur more (inc n) (if toggle (not fence) fence)
+                       (if (and (not fence) (not toggle) (not (str/starts-with? line "|"))
+                                (> (count line) width))
+                         (conj acc (str file ":" n ": " (count line) " columns"))
+                         acc))))))
+
+  test:cli {:doc "The black-box CLI suite"
+            :task (shell "bb test/cli_test.clj")}
+
+  test:ert {:doc "The Emacs ERT suite, against this checkout's legu"
+            :task (shell {:dir "emacs"}
+                         "emacs -Q --batch -L . -l legu-tests.el -f ert-run-tests-batch-and-exit")}
+
+  test {:doc "Both suites"
+        :depends [test:cli test:ert]}
+
+  lint {:doc "clj-kondo, and prose no wider than 85 columns"
+        :task (do (shell "clj-kondo --lint legu test/cli_test.clj")
+                  (let [wide (mapcat (fn [file] (wide-lines file 85))
+                                     ["README.md" "emacs/README.md" "CONTEXT.md"
+                                      "CODING_STANDARDS.md" "AGENTS.md"])]
+                    (when (seq wide)
+                      (run! println wide)
+                      (println "legu: rewrap these lines to about 78 columns")
+                      (System/exit 1))))}}}

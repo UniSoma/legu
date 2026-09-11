@@ -29,6 +29,14 @@
 (require 'legu-diff)
 (require 'legu-dired)
 
+;; The integration half drives the legu beside this package rather than
+;; whichever one PATH holds, so a checkout tests its own CLI and the plain
+;; command runs every case.
+(let ((local (expand-file-name
+              "../legu" (file-name-directory (or load-file-name buffer-file-name)))))
+  (when (file-executable-p local)
+    (setq legu-executable local)))
+
 (declare-function evil-local-mode "evil-core")
 (declare-function evil-normal-state "evil-states")
 (declare-function evil-visual-line "evil-states")

@@ -77,13 +77,24 @@
                :extra-env {"XDG_CONFIG_HOME" (config-home dir)}}
          legu args))
 
+(defn- store-snapshot
+  "Every file under dir's .review/, as a map of relative path to content."
+  [dir]
+  (let [store (fs/file dir ".review")]
+    (into (sorted-map)
+          (for [f (file-seq store) :when (.isFile f)]
+            [(str (fs/relativize store f)) (slurp f)]))))
+
 (defn- fails-with
-  "Asserts that args exit 1 with message on stderr and nothing on stdout.
-   Checking the three together keeps a case from passing on the right text and
+  "Asserts that args exit 1 with message on stderr and nothing on stdout, and
+   leave the store as it was: a command that cannot land changes nothing.
+   Checking these together keeps a case from passing on the right text and
    the wrong exit code."
   [dir args message]
-  (let [{:keys [exit out err]} (apply legu! dir args)]
-    (is (= [1 "" (str "legu: " message "\n")] [exit out err]) (pr-str args))))
+  (let [before (store-snapshot dir)
+        {:keys [exit out err]} (apply legu! dir args)]
+    (is (= [1 "" (str "legu: " message "\n")] [exit out err]) (pr-str args))
+    (is (= before (store-snapshot dir)) (str (pr-str args) " changed the store"))))
 
 (defn- prints-the-same-as
   "Asserts that run succeeded and printed what plain printed. The shape of
@@ -861,12 +872,13 @@
     (fails-with dir mark (str ".review/signers does not list the key in " (key-file dir "key.pub")
                               "; add it with legu key add"))
     (legu! dir "key" "add")
+    ;; A record already in place is what a refused re-mark must leave alone.
+    (is (zero? (:exit (apply legu! dir mark))))
     (fails-with dir (conj mark "--reviewer" reviewer)
                 "a signed store takes the reviewer from .review/signers, so mark does not take --reviewer")
     (fs/delete (key-file dir "key"))
     (fails-with dir mark (str "no signing key at " (key-file dir "key")
-                              "; create one with legu key init"))
-    (is (nil? (sidecar-lines dir "alpha.txt")))))
+                              "; create one with legu key init"))))
 
 (deftest a-refused-mark-leaves-the-sidecar-as-it-was
   ;; The key is read and checked before mark prunes anything, so a re-mark

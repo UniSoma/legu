@@ -145,16 +145,16 @@ an older asynchronous answer.
 2. **A per-file query.** When the sidecar at the file's current path cannot
    account for it — there is none, or a record's hash no longer matches — and
    no trusted snapshot already covers it, one `legu regions <path> --json`
-   runs for that file alone, asynchronously, and paints the reviewed and
-   stale regions and the ticket lines at their current anchors. It is the CLI, so unlike
-   the sidecar pass above it may pronounce stale, moved or missing. This is
-   what paints a file whose regions were read under a previous name, before
-   any snapshot has run. The answer is dropped if the buffer changed since it
-   was asked for, or if a newer answer or a trusted snapshot has overtaken it;
-   an incomplete one paints what was resolved and keeps the unverified
-   indicator. The same query runs after save and after revert, under the same
-   condition. Once a snapshot is cached, most opens are covered by it and this
-   tier is skipped too.
+   runs for that file alone, asynchronously, and paints the reviewed and stale
+   regions and the ticket lines at their current anchors. It is the CLI, so
+   unlike the sidecar pass above it may pronounce stale, moved or missing.
+   This is what paints a file whose regions were read under a previous name,
+   before any snapshot has run. The answer is dropped if the buffer changed
+   since it was asked for, or if a newer answer or a trusted snapshot has
+   overtaken it; an incomplete one paints what was resolved and keeps the
+   unverified indicator. The same query runs after save and after revert,
+   under the same condition. Once a snapshot is cached, most opens are covered
+   by it and this tier is skipped too.
 3. **A repository snapshot**, from one `legu status --json` and one
    `legu stale --json`, run asynchronously and cached. `legu coverage` and
    `legu next` are never invoked: both are arithmetic over the same rows, and
@@ -303,10 +303,12 @@ the CLI's `:file-hash` byte for byte on files with tabs, CRLF, a non-UTF-8
 byte and no trailing newline. If that ever drifts, the fast path is silently
 wrong, and this is the test that says so.
 
-The suite skips its integration half when `legu` is not installed, and its
-evil group when evil is not on the load path. `-Q` drops the site files that
-put a package manager's directories on `load-path`, so name evil and its
-`goto-chg` dependency yourself:
+The integration half runs the `legu` beside the package, `../legu`, so a
+checkout tests its own CLI; an installed package falls back to `legu` on PATH
+and skips that half when there is none. The evil group skips when evil is not
+on the load path. `-Q` drops the site files that put a package manager's
+directories on `load-path`, so name evil and its `goto-chg` dependency
+yourself:
 
 ```
 emacs -Q --batch -L . -L /path/to/evil -L /path/to/goto-chg \

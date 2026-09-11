@@ -1,0 +1,3 @@
+;; legu is a script with no .clj extension, so its namespace, legu.main, can
+;; never match its file name.
+{:linters {:namespace-name-mismatch {:level :off}}}

@@ -117,7 +117,7 @@
 
       :else
       (let [{:keys [exit out err]} (git "ls-files" "-c" "-i" "-z"
-                                        (str "--exclude-from=" (str f)))]
+                                        (str "--exclude-from=" f))]
         (when-not (zero? exit)
           (die (str "cannot apply .review/ignore: " (str/trim (or err "")))))
         (set (split-z out))))))
