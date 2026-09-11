@@ -6,7 +6,7 @@ type: chore
 priority: 2
 mode: afk
 created: '2026-09-11T18:07:45.490878027Z'
-updated: '2026-09-11T18:40:00.254307164Z'
+updated: '2026-09-11T18:40:18.729121169Z'
 closed: '2026-09-11T18:40:00.254307164Z'
 parent: lgu-01m28sh82tk1
 tags:
@@ -23,6 +23,8 @@ acceptance:
   done: true
 - title: README, Emacs README and CONTEXT.md name the new locations; the repo's own store is moved
   done: true
+external_refs:
+- git:56a7400
 ---
 
 ## Description
