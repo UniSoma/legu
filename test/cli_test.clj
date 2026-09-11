@@ -61,12 +61,21 @@
     (git! dir "commit" "-qm" "initial")
     dir))
 
+(defn- config-home
+  "The XDG_CONFIG_HOME every run of legu gets, inside the scratch tree: a case
+   that reached the real one would read or overwrite the signing key of
+   whoever runs the suite."
+  [dir]
+  (str (fs/file dir ".config")))
+
 (defn- legu!
   "Runs the real script in dir and returns {:exit :out :err}. p/sh, not
    p/shell: a non-zero exit is what half these cases assert on, and p/shell
    would throw before the assertion saw it."
   [dir & args]
-  (apply p/sh {:dir dir :out :string :err :string} legu args))
+  (apply p/sh {:dir dir :out :string :err :string
+               :extra-env {"XDG_CONFIG_HOME" (config-home dir)}}
+         legu args))
 
 (defn- fails-with
   "Asserts that args exit 1 with message on stderr and nothing on stdout.
@@ -98,8 +107,11 @@
     ;; Pinned by the names it must contain, not verbatim: the blob itself is
     ;; regenerated when the parser moves to babashka.cli.
     (doseq [named ["mark" "ticket" "forget" "status" "regions" "stale" "next" "coverage"
-                   "--json" "--version"]]
+                   "key" "--json" "--version"]]
       (is (str/includes? (:out bare) named) named))
+    ;; key is one line at the root; its subcommands are a `legu key --help` away.
+    (doseq [subcommand ["init" "show" "add"]]
+      (is (not (re-find (re-pattern (str "(?m)^  " subcommand " ")) (:out bare))) subcommand))
     ;; This loop asserted --reviewer, --limit, --order and --gaps here too, until
     ;; lgu-01m238wskh6s scoped each to the one command that reads it. Root help
     ;; lists what legu itself takes; the rest is a command's own help away.
@@ -130,6 +142,21 @@
     ;; --json is legu's own, so it survives on every page.
     (doseq [page [mark status regions queue stale]]
       (is (str/includes? page "--json") page))))
+
+(deftest key-lists-its-subcommands-with-or-without-help
+  (let [dir (scratch-repo!)
+        bare (legu! dir "key")
+        help (legu! dir "key" "--help")
+        init (legu! dir "key" "init" "--help")]
+    (is (= [0 ""] [(:exit bare) (:err bare)]))
+    (is (= [0 0] [(:exit help) (:exit init)]))
+    (is (= (:out bare) (:out help)))
+    (is (str/includes? (:out help) "Usage: legu key"))
+    (doseq [subcommand ["init" "show" "add"]]
+      (is (re-find (re-pattern (str "(?m)^  " subcommand " ")) (:out help)) subcommand))
+    (is (str/includes? (:out init) "Usage: legu key init"))
+    (is (str/includes? (:out init) "--json"))
+    (is (not (str/includes? (:out init) "--reviewer")))))
 
 (deftest mark-and-coverage-describe-themselves-in-the-glossarys-words
   ;; lgu-01m23d9faenk: mark's help said "reviewed at HEAD" and coverage's said
@@ -234,7 +261,11 @@
     (fails-with dir ["status" "--limit" "3"] "status does not take --limit")
     (fails-with dir ["next" "--gaps"] "next does not take --gaps")
     (fails-with dir ["coverage" "--reviewer" "me"] "coverage does not take --reviewer")
-    (fails-with dir ["mark" "alpha.txt" "--order" "dir"] "mark does not take --order")))
+    (fails-with dir ["mark" "alpha.txt" "--order" "dir"] "mark does not take --order")
+    ;; A subcommand is named by its whole path: `init does not take` would
+    ;; leave the reader to guess which init.
+    (fails-with dir ["key" "init" "--reviewer" "me"] "key init does not take --reviewer")
+    (fails-with dir ["key" "--limit" "3"] "key does not take --limit")))
 
 (deftest an-argument-is-not-also-an-option-spelling
   ;; The dispatch tree names each command's arguments so that an option after
@@ -294,7 +325,10 @@
                             [["regions" "a" "b"] "unexpected argument: b"]
                             [["stale" "x"] "unexpected argument: x"]
                             [["next" "x"] "unexpected argument: x"]
-                            [["coverage" "extra"] "unexpected argument: extra"]]]
+                            [["coverage" "extra"] "unexpected argument: extra"]
+                            [["key" "init" "extra"] "unexpected argument: extra"]
+                            [["key" "show" "extra"] "unexpected argument: extra"]
+                            [["key" "add" "extra"] "unexpected argument: extra"]]]
       (fails-with dir args message))))
 
 (deftest a-command-names-the-argument-it-is-missing
@@ -358,7 +392,8 @@
 (deftest an-unknown-command-is-refused
   (let [dir (scratch-repo!)]
     (fails-with dir ["badcmd"] "unknown command: badcmd")
-    (fails-with dir ["-"] "unknown command: -")))
+    (fails-with dir ["-"] "unknown command: -")
+    (fails-with dir ["key" "bogus"] "unknown command: key bogus")))
 
 (deftest an-unknown-option-is-refused-wherever-it-appears
   (let [dir (scratch-repo!)]
@@ -600,6 +635,143 @@
             path)))
     (is (= 12 (:eligible-lines (coverage-json dir))))))
 
+;; ---------------------------------------------------------------- keys
+
+;; ADR-0016: each user signs with a key kept under their config directory, and
+;; a store lists the keys it trusts in .review/signers. legu! points
+;; XDG_CONFIG_HOME inside the scratch tree, so every key below is made there.
+
+(defn- key-file [dir name]
+  (fs/file (config-home dir) "legu" name))
+
+(def ^:private base64-32-bytes #"[A-Za-z0-9+/]{43}=\n")
+
+(deftest key-init-writes-an-owner-only-seed-and-its-public-half
+  (let [dir (scratch-repo!)
+        {:keys [exit out err]} (legu! dir "key" "init")
+        private (key-file dir "key")
+        public (key-file dir "key.pub")]
+    (is (= [0 ""] [exit err]))
+    (is (= (str "created " private " and " public "\n") out))
+    (is (re-matches base64-32-bytes (slurp private)))
+    (is (re-matches base64-32-bytes (slurp public)))
+    (is (not= (slurp private) (slurp public)))
+    (is (= "rw-------" (fs/posix->str (fs/posix-file-permissions private))))))
+
+(deftest key-init-falls-back-to-config-under-home
+  ;; HOME points into the scratch tree, so the fallback never reaches the
+  ;; developer's own ~/.config.
+  (let [dir (scratch-repo!)
+        home (str (fs/file dir "home"))
+        {:keys [exit err]} (p/sh {:dir dir :out :string :err :string
+                                  :extra-env {"XDG_CONFIG_HOME" "" "HOME" home}}
+                                 legu "key" "init")]
+    (is (= [0 ""] [exit err]))
+    (is (fs/exists? (fs/file home ".config" "legu" "key")))
+    (is (fs/exists? (fs/file home ".config" "legu" "key.pub")))))
+
+(deftest key-init-refuses-to-replace-a-key
+  (let [dir (scratch-repo!)
+        _ (legu! dir "key" "init")
+        private (key-file dir "key")
+        before [(slurp private) (slurp (key-file dir "key.pub"))]]
+    (fails-with dir ["key" "init"]
+                (str "a signing key already exists at " private
+                     "; legu key init never replaces one"))
+    (is (= before [(slurp private) (slurp (key-file dir "key.pub"))]))))
+
+(defn- public-key [dir]
+  (str/trim (slurp (key-file dir "key.pub"))))
+
+(deftest key-show-prints-the-signers-line-for-the-key
+  (let [dir (scratch-repo!)
+        _ (legu! dir "key" "init")
+        {:keys [exit out err]} (legu! dir "key" "show")]
+    (is (= [0 ""] [exit err]))
+    (is (= (str (public-key dir) " " reviewer "\n") out))))
+
+(deftest key-show-and-add-need-a-key-and-a-name
+  (let [dir (scratch-repo!)
+        no-key (str "no signing key at " (key-file dir "key.pub")
+                    "; create one with legu key init")]
+    (fails-with dir ["key" "show"] no-key)
+    (fails-with dir ["key" "add"] no-key)
+    (legu! dir "key" "init")
+    ;; Set empty rather than unset: the repo's own value hides any global one
+    ;; the machine running the suite has.
+    (git! dir "config" "user.name" "")
+    (doseq [command ["show" "add"]]
+      (fails-with dir ["key" command]
+                  "git config user.name is not set, and the signers list names the key after it; set it with git config user.name <name>"))
+    (is (not (fs/exists? (fs/file dir ".review" "signers"))))))
+
+(defn- signers-text [dir]
+  (let [f (fs/file dir ".review" "signers")]
+    (when (fs/exists? f) (slurp f))))
+
+(deftest key-add-creates-the-signers-list-and-adds-a-key-once
+  (let [dir (scratch-repo!)
+        _ (legu! dir "key" "init")
+        line (str (public-key dir) " " reviewer)
+        first-run (legu! dir "key" "add")
+        written (signers-text dir)
+        second-run (legu! dir "key" "add")]
+    (is (= [0 "" (str "added to .review/signers: " line "\n")]
+           ((juxt :exit :err :out) first-run)))
+    (is (= (str line "\n") written))
+    (is (= [0 "" (str ".review/signers already lists: " line "\n")]
+           ((juxt :exit :err :out) second-run)))
+    (is (= written (signers-text dir)))
+    ;; key show prints the line key add writes.
+    (is (= (str line "\n") (:out (legu! dir "key" "show"))))))
+
+(deftest key-add-refuses-a-key-listed-under-another-name
+  (let [dir (scratch-repo!)
+        _ (legu! dir "key" "init")
+        _ (legu! dir "key" "add")
+        before (signers-text dir)]
+    (git! dir "config" "user.name" "Someone Else")
+    (fails-with dir ["key" "add"] ".review/signers already lists this key as Test Reviewer")
+    (is (= before (signers-text dir)))))
+
+(deftest key-add-appends-past-comments-blank-lines-and-other-keys
+  ;; A name may own several keys, so another key under the same name is no
+  ;; conflict. A comment naming this key under another name is not a binding,
+  ;; and a line that is not a binding at all is left for verify to report.
+  (let [dir (scratch-repo!)
+        _ (legu! dir "key" "init")
+        key (public-key dir)
+        existing (str "# who may sign\n"
+                      "# " key " Mallory\n"
+                      "\n"
+                      "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= " reviewer "\n"
+                      "not-a-binding\n"
+                      "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB= Someone Else")
+        _ (write-files! dir {".review/signers" existing})
+        {:keys [exit err]} (legu! dir "key" "add")]
+    (is (= [0 ""] [exit err]))
+    ;; The last line had no newline, so key add supplies one before its own.
+    (is (= (str existing "\n" key " " reviewer "\n") (signers-text dir)))))
+
+(deftest each-key-subcommand-answers-in-json
+  (let [dir (scratch-repo!)
+        run (fn [& args]
+              (let [{:keys [exit out err]} (apply legu! dir (conj (vec args) "--json"))]
+                (is (= [0 ""] [exit err]) (pr-str args))
+                (json/parse-string out)))
+        init (run "key" "init")
+        key (public-key dir)]
+    (is (= {"private-key-file" (str (key-file dir "key"))
+            "public-key-file" (str (key-file dir "key.pub"))
+            "public-key" key}
+           init))
+    (is (= {"public-key" key "reviewer" reviewer "line" (str key " " reviewer)}
+           (run "key" "show")))
+    (is (= {"file" ".review/signers" "public-key" key "reviewer" reviewer "added" true}
+           (run "key" "add")))
+    (is (= {"file" ".review/signers" "public-key" key "reviewer" reviewer "added" false}
+           (run "key" "add")))))
+
 ;; ---------------------------------------------------------------- completion
 
 ;; babashka.cli derives these from the same table that parses a command line,
@@ -612,12 +784,16 @@
 ;; What every drive of completion is checked against, in one place: six copies
 ;; of these lists meant six edits to add a command.
 (def ^:private offered-commands
-  ["mark" "ticket" "forget" "status" "regions" "stale" "next" "coverage"])
+  ["mark" "ticket" "forget" "status" "regions" "stale" "next" "coverage" "key"])
 
+(def ^:private offered-subcommands {"key" ["init" "show" "add"]})
+
+;; Keyed by the words before the options, so a subcommand fits beside a command.
 (def ^:private offered-options
-  {"next" ["--limit" "--order" "--help" "--json" "--version"]
-   "status" ["--gaps" "--help" "--json" "--version"]
-   "mark" ["--reviewer" "--help" "--json" "--version"]})
+  {["next"] ["--limit" "--order" "--help" "--json" "--version"]
+   ["status"] ["--gaps" "--help" "--json" "--version"]
+   ["mark"] ["--reviewer" "--help" "--json" "--version"]
+   ["key" "init"] ["--help" "--json" "--version"]})
 
 (def ^:private offered-orders ["dir" "cochange"])
 
@@ -654,18 +830,21 @@
 
 (deftest completion-offers-the-command-names
   (let [dir (scratch-repo!)]
-    (is (= offered-commands (candidates dir "")))))
+    (is (= offered-commands (candidates dir "")))
+    (doseq [[group subcommands] offered-subcommands]
+      (is (= subcommands (candidates dir group "")) group))))
 
 (deftest completion-offers-only-the-options-the-command-takes
   (let [dir (scratch-repo!)]
     (doseq [[command expected] offered-options]
-      (is (= expected (candidates dir command "--")) command))
-    ;; The claim under all three: nothing offered is anything the command would
-    ;; turn down. An option legu has elsewhere is refused by name, so a wrong
-    ;; candidate shows up here as that refusal rather than as a missing flag.
+      (is (= expected (apply candidates dir (conj command "--"))) command))
+    ;; The claim under all of them: nothing offered is anything the command
+    ;; would turn down. An option legu has elsewhere is refused by name, so a
+    ;; wrong candidate shows up here as that refusal rather than as a missing
+    ;; flag.
     (doseq [command (keys offered-options)
-            candidate (candidates dir command "--")
-            :let [{:keys [err]} (legu! dir command candidate "x")]]
+            candidate (apply candidates dir (conj command "--"))
+            :let [{:keys [err]} (apply legu! dir (conj command candidate "x"))]]
       (is (not (str/includes? err "does not take")) (str command " " candidate)))))
 
 (deftest completion-offers-the-orders-next-accepts
@@ -687,7 +866,8 @@
   {"PATH" (str (shell-path dir) java.io.File/pathSeparator (System/getenv "PATH"))
    ;; fish and zsh both write under $HOME on startup, and the home of whoever
    ;; runs the suite is not the suite's to write to.
-   "HOME" dir})
+   "HOME" dir
+   "XDG_CONFIG_HOME" (config-home dir)})
 
 (defn- installed?
   "Whether the shell is there to be driven. A missing one fails rather than
@@ -718,8 +898,10 @@
                         (is (= 0 exit))
                         (described out)))]
         (is (= offered-commands (offered "")))
+        (doseq [[group subcommands] offered-subcommands]
+          (is (= subcommands (offered group "")) group))
         (doseq [[command expected] offered-options]
-          (is (= expected (offered command "--")) command))
+          (is (= expected (apply offered (conj command "--"))) command))
         (is (= offered-orders (offered "next" "--order" "")))))))
 
 (deftest fish-completes-a-command-line-through-the-snippet
@@ -741,11 +923,12 @@
                         (->> (str/split-lines out)
                              (remove str/blank?)
                              (mapv #(first (str/split % #"\t"))))))]
-        (is (= ["mark" "ticket" "forget" "status" "regions" "stale" "next" "coverage"]
-               (offered "legu ")))
-        (is (= ["--limit" "--order" "--help" "--json" "--version"] (offered "legu next --")))
-        (is (= ["--gaps" "--help" "--json" "--version"] (offered "legu status --")))
-        (is (= ["dir" "cochange"] (offered "legu next --order ")))))))
+        (is (= offered-commands (offered "legu ")))
+        (doseq [[group subcommands] offered-subcommands]
+          (is (= subcommands (offered (str "legu " group " "))) group))
+        (doseq [[command expected] offered-options]
+          (is (= expected (offered (str "legu " (str/join " " command) " --"))) command))
+        (is (= offered-orders (offered "legu next --order ")))))))
 
 (deftest zsh-completes-a-command-line-through-the-snippet
   (when (installed? "zsh")
@@ -773,8 +956,12 @@
         (let [names (offered "legu ")]
           (doseq [named offered-commands]
             (is (str/includes? names named) named)))
+        (doseq [[group subcommands] offered-subcommands
+                :let [painted (offered (str "legu " group " "))]
+                subcommand subcommands]
+          (is (str/includes? painted subcommand) (str group " " subcommand)))
         (doseq [[command expected] offered-options
-                :let [painted (offered (str "legu " command " --"))]]
+                :let [painted (offered (str "legu " (str/join " " command) " --"))]]
           (doseq [named expected]
             (is (str/includes? painted named) (str command " " named)))
           ;; The point of the ticket: an option another command owns is not

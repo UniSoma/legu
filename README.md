@@ -22,9 +22,9 @@ cp legu ~/.local/bin/legu   # anywhere on PATH
 
 ## Shell completion
 
-legu completes command names, the options each command takes, and the values
-`--order` accepts. It builds them from the same table that parses the command
-line, so they stay right as legu grows options.
+legu completes command names, the subcommands of `key`, the options each
+command takes, and the values `--order` accepts. It builds them from the same
+table that parses the command line, so they stay right as legu grows options.
 
 Add one line to your shell's init file.
 
@@ -65,6 +65,9 @@ legu stale                             # regions that need a re-read
 legu next --limit 20                   # what to read next, in directory order
 legu next --order cochange             # ...ordered by what changes with what you read
 legu coverage                          # the three numbers
+legu key init                          # create this machine's signing key
+legu key show                          # print the key's line for a signers list
+legu key add                           # add that line to .review/signers
 ```
 
 Each option belongs to the one command that reads it, and stands after that
@@ -267,7 +270,7 @@ Doom users are supported out of the box. See
 The store is `.review/` at the repo root, committed alongside the code. It
 holds everything legu owns: one JSON Lines sidecar per source file under
 `.review/sidecars/`, mirroring the source tree (`.review/sidecars/<path>.jsonl`),
-and the ignore list at `.review/ignore`
+the ignore list at `.review/ignore` and the signers list at `.review/signers`
 ([ADR-0017](docs/adr/0017-everything-legu-owns-lives-under-the-store.md)).
 Source files are never modified.
 
@@ -293,7 +296,7 @@ nothing left in it is removed. Sidecars of any other schema are refused, not
 migrated ([ADR-0015](docs/adr/0015-jsonl-sidecars-one-record-per-line.md)).
 The committed `.gitattributes` marks `.review/sidecars/**` as generated, which
 collapses sidecars in GitHub and GitLab review views. Files at the store's root,
-such as the ignore list, show in full.
+such as the ignore list and the signers list, show in full.
 
 legu skips a sidecar it cannot parse — most often one with a merge conflict
 left in it — instead of dying on it. One line that does not parse makes the
@@ -332,6 +335,75 @@ as you expect.
 
 Binary files (detected by a NUL byte in the first 8 KB) and empty files count
 as one line each.
+
+## Signing
+
+In a signed store, each review record carries an Ed25519 signature made with
+the key of the person who marked it, so a reader can tell who made a record
+([ADR-0016](docs/adr/0016-signed-review-records.md)). A store is signed when it
+has a signers list, `.review/signers`. A store without one needs no key and
+behaves as it always has.
+
+To turn signing on, each reviewer creates a key once per machine and adds it to
+the signers list, and the repository commits the list:
+
+```
+legu key init             # once per machine
+legu key add              # list the key in .review/signers
+git add .review/signers && git commit -m "Sign reviews"
+```
+
+A reviewer who cannot push to the repository runs `legu key show` and hands the
+line it prints to someone who can.
+
+`mark` does not sign records yet. Until it does, a signers list changes nothing
+that any command does.
+
+### Keys
+
+`legu key init` writes two files to `$XDG_CONFIG_HOME/legu/`, or to
+`~/.config/legu/` when `XDG_CONFIG_HOME` is unset:
+
+- `key` holds the 32-byte Ed25519 seed, base64 on one line. legu creates it with
+  mode 0600, so only its owner can read it. The key has no passphrase, so a mark
+  never prompts.
+- `key.pub` holds the 32-byte public key, base64 on one line. `key show` and
+  `key add` read the public key from this file.
+
+`key init` refuses to run when `key` exists, so a second run cannot destroy the
+key a signers list names.
+
+`legu key show` prints the key's signers-list line: the public key, one space,
+then `git config user.name`. `legu key add` appends that line to
+`.review/signers`, and creates `.review/` and the file when they are missing. A
+second `key add` with the same line changes nothing. When the list already has
+the key under another name, `key add` fails and names that name, because one key
+belongs to one reviewer. Both commands fail with no key, naming `legu key init`,
+and with no `git config user.name`.
+
+With `--json`, each command prints an object:
+
+- `key init`: `private-key-file` and `public-key-file`, the two absolute paths, and
+  `public-key`.
+- `key show`: `public-key`, `reviewer`, and `line`, the line itself.
+- `key add`: `file` (always `.review/signers`), `public-key`, `reviewer`, and
+  `added`, which is false when the line was already there.
+
+### The signers list
+
+`.review/signers` lists one key per line: the public key in base64, one space,
+then the reviewer name to the end of the line.
+
+```
+# Reviewers whose marks this repository trusts
+8EJFVMYkblOCNPJAWEwiIPxVq3CWljggnjD0+kUfQ4s= Ana Lima
+Tf/LAC9t33pEG+PpOcb30SyBnKikfUXeSfkNt0KTaNU= Ana Lima
+```
+
+legu skips blank lines and lines that start with `#`. A key appears at most
+once. A name can appear on several lines, one for each machine its reviewer
+signs from. The list is committed and shows in full in review views, so a change
+to who may sign is a diff to one file.
 
 ## Ticket references, not prose
 

@@ -9,10 +9,11 @@
             [cheshire.core :as json]
             [clojure.set :as set]
             [clojure.string :as str])
-  (:import [java.security MessageDigest]
+  (:import [java.nio.file FileAlreadyExistsException]
+           [java.security KeyPairGenerator MessageDigest]
            [java.time Instant]
            [java.time.temporal ChronoUnit]
-           [java.util HexFormat]))
+           [java.util Arrays Base64 HexFormat]))
 
 (def ^:dynamic *root* ".")
 (def ^:dynamic *git?* true)
@@ -258,6 +259,25 @@
 
 (defn store-file [path]
   (fs/file *root* (store-path path)))
+
+(def signers-path
+  "The signers list, relative to the repo root (ADR-0016, ADR-0017). Its
+   presence is what makes the store signed."
+  ".review/signers")
+
+(defn signers-file []
+  (fs/file *root* signers-path))
+
+(defn- parse-signers
+  "The bindings in a signers list's text, in file order, as
+   {:public-key :reviewer}: the key, one space, then the name to end of line.
+   Blank lines and lines starting with # are not bindings, and neither is a
+   line of any other shape; reporting those is verify's job."
+  [text]
+  (for [line (str/split-lines text)
+        :let [[_ public-key reviewer] (re-matches #"([^\s#]\S*) (.+)" line)]
+        :when public-key]
+    {:public-key public-key :reviewer reviewer}))
 
 ;; Sidecars are committed alongside the code, so a merge conflict in one is
 ;; expected. Reading collects them here and answers for every other file;
@@ -1466,6 +1486,104 @@
                                 :unreviewed unr :reviewed rev :stale stl}
                                nil))))))
 
+;; ---------------------------------------------------------------- keys
+
+(defn- key-dir
+  "Where this user's signing key lives (ADR-0016): legu/ under
+   $XDG_CONFIG_HOME, or under ~/.config when that is unset or empty."
+  []
+  (fs/file (or (not-empty (System/getenv "XDG_CONFIG_HOME"))
+               (fs/file (or (not-empty (System/getenv "HOME")) (str (fs/home))) ".config"))
+           "legu"))
+
+(defn- private-key-file [] (fs/file (key-dir) "key"))
+
+(defn- public-key-file [] (fs/file (key-dir) "key.pub"))
+
+(defn- base64 [^bytes bs]
+  (.encodeToString (Base64/getEncoder) bs))
+
+(defn cmd-key-init
+  "Creates the signing key: the 32-byte seed in key, owner-only, and the
+   32-byte public key in key.pub, each base64 on one line. Refuses when key
+   exists, so a second run cannot destroy the key a signers list names."
+  [{:keys [opts]}]
+  (let [private (private-key-file)
+        public (public-key-file)]
+    (fs/create-dirs (fs/parent private))
+    ;; babashka exposes no EdEC key classes, so the raw halves are cut out of
+    ;; the JDK's DER encodings: the seed after PKCS#8's 16-byte header, the
+    ;; public key after X.509's 12-byte one.
+    (let [pair (.generateKeyPair (KeyPairGenerator/getInstance "Ed25519"))
+          seed (Arrays/copyOfRange (.getEncoded (.getPrivate pair)) 16 48)
+          public-key (base64 (Arrays/copyOfRange (.getEncoded (.getPublic pair)) 12 44))]
+      ;; Owner-only from creation rather than chmodded after the seed is in it,
+      ;; and create-file's refusal of an existing file is the overwrite check:
+      ;; no separate test can race it.
+      (try (fs/create-file private {:posix-file-permissions "rw-------"})
+           (catch FileAlreadyExistsException _
+             (die (str "a signing key already exists at " private
+                       "; legu key init never replaces one"))))
+      ;; A key file left empty by a failed write would refuse every later init.
+      (try (spit private (str (base64 seed) "\n"))
+           (spit public (str public-key "\n"))
+           (catch Exception e
+             (fs/delete-if-exists private)
+             (throw e)))
+      (emit opts {:private-key-file (str private) :public-key-file (str public)
+                  :public-key public-key}
+            (fn [_] (println (str "created " private " and " public)))))))
+
+(defn- local-binding
+  "The signers-list binding for this machine: the public key from key.pub and
+   the name from git config user.name. key.pub, not the seed, is the source of
+   the public key: babashka cannot derive one from the other. Dies naming
+   what supplies whichever half is missing."
+  []
+  (let [public (public-key-file)
+        public-key (when (fs/exists? public) (not-empty (str/trim (slurp public))))
+        reviewer (some-> (git-ok "config" "user.name") str/trim not-empty)]
+    (cond
+      (nil? public-key)
+      (die (str "no signing key at " public "; create one with legu key init"))
+      (nil? reviewer)
+      (die "git config user.name is not set, and the signers list names the key after it; set it with git config user.name <name>")
+      :else {:public-key public-key :reviewer reviewer})))
+
+(defn- signers-line [{:keys [public-key reviewer]}]
+  (str public-key " " reviewer))
+
+(defn cmd-key-show [{:keys [opts]}]
+  (let [binding (local-binding)]
+    (emit opts (assoc binding :line (signers-line binding))
+          (fn [{:keys [line]}] (println line)))))
+
+(defn cmd-key-add
+  "Lists this machine's key in the store's signers list, creating the list,
+   and with it .review/, when absent. A key already listed under the same name
+   is left as it is; under another name it is refused, since one key binds to
+   one reviewer."
+  [{:keys [opts]}]
+  (let [{:keys [public-key reviewer] :as binding} (local-binding)
+        f (signers-file)
+        text (if (fs/exists? f) (slurp f) "")
+        listed (first (filter #(= public-key (:public-key %)) (parse-signers text)))]
+    (when (and listed (not= reviewer (:reviewer listed)))
+      (die (str signers-path " already lists this key as " (:reviewer listed))))
+    (when-not listed
+      (fs/create-dirs (fs/parent f))
+      ;; A hand-edited list may end without a newline, and appending straight
+      ;; onto its last line would change that binding.
+      (spit f (str (when-not (or (empty? text) (str/ends-with? text "\n")) "\n")
+                   (signers-line binding) "\n")
+            :append true))
+    (emit opts (assoc binding :file signers-path :added (nil? listed))
+          (fn [{:keys [added]}]
+            (println (str (if added
+                            (str "added to " signers-path ": ")
+                            (str signers-path " already lists: "))
+                          (signers-line binding)))))))
+
 ;; ---------------------------------------------------------------- cli
 
 (def options
@@ -1491,7 +1609,9 @@
   "One entry per command. :doc is both its line in `legu --help` and the
    description in its own help; :arguments names the arguments it takes, in
    order, :optional the ones it can run without, and :options the keys of
-   command-options it reads."
+   command-options it reads. An entry without :run is a group: it runs
+   nothing itself, and the entries whose :cmds extend its own are its
+   subcommands."
   [{:cmds ["mark"] :run cmd-mark :arguments [:target] :options [:reviewer]
     :doc "mark a region reviewed as it stands in the working tree"}
    {:cmds ["ticket"] :run cmd-ticket :arguments [:target :id]
@@ -1508,7 +1628,15 @@
    {:cmds ["next"] :run cmd-next :arguments [] :options [:limit :order]
     :doc "what to read next"}
    {:cmds ["coverage"] :run cmd-coverage :arguments []
-    :doc "unreviewed / reviewed / stale"}])
+    :doc "unreviewed / reviewed / stale"}
+   {:cmds ["key"]
+    :doc "this machine's signing key and the store's signers list"}
+   {:cmds ["key" "init"] :run cmd-key-init :arguments []
+    :doc "create the signing key"}
+   {:cmds ["key" "show"] :run cmd-key-show :arguments []
+    :doc "print the signers-list line for the signing key"}
+   {:cmds ["key" "add"] :run cmd-key-add :arguments []
+    :doc "add the signing key to the store's signers list"}])
 
 (def argument-specs
   "What each argument is called in help and what its value must satisfy. The
@@ -1596,6 +1724,18 @@
                             :prog (str/join " " (cons "legu" cmds))
                             :spec options}))
 
+(defn group-help
+  "The help for a group: its subcommands, listed as `legu --help` lists
+   commands."
+  [{:keys [cmds]}]
+  (cli/format-command-help
+   {:table (for [command commands
+                 :when (and (= (inc (count cmds)) (count (:cmds command)))
+                            (= cmds (pop (:cmds command))))]
+             (update command :cmds (comp vector peek)))
+    :prog (str/join " " (cons "legu" cmds))
+    :spec options}))
+
 (defn print-version [opts]
   (emit opts {:version VERSION :schema sidecar-schema}
         (fn [{:keys [version schema]}]
@@ -1630,8 +1770,19 @@
                      (die message))
                    (run {:opts opts}))))})
 
+(defn group-entry
+  "A group's entry in the dispatch tree. On its own, or with --help, it prints
+   the subcommands; any other word after it is an unknown command."
+  [{:keys [cmds doc] :as group}]
+  {:cmds cmds
+   :doc doc
+   :restrict true
+   :restrict-args true
+   :fn (fn [{:keys [opts]}]
+         (if (:version opts) (print-version opts) (println (group-help group))))})
+
 (def dispatch-table
-  (conj (mapv dispatch-entry commands)
+  (conj (mapv #(if (:run %) (dispatch-entry %) (group-entry %)) commands)
         {:cmds []
          :restrict true
          ;; Without this a word that names no command is read as one of legu's
@@ -1667,9 +1818,9 @@
   (if-let [owners (and (contains? command-options (keyword (str/replace typed #"^--" "")))
                        (seq (for [{:keys [cmds options]} commands
                                   :when (some #{(keyword (str/replace typed #"^--" ""))} options)]
-                              (first cmds))))]
+                              (str/join " " cmds))))]
     (if (seq dispatch)
-      (str (last dispatch) " does not take " typed)
+      (str (str/join " " dispatch) " does not take " typed)
       (str typed " belongs to " (str/join " and " owners)
            ", and stands after it"))
     (str "unknown option: " typed)))
@@ -1687,8 +1838,10 @@
                        (refused-value option (:optional command) value)))))
              (case cause
                :restrict (refused-option (typed-flag flag argv) dispatch)
-               ;; At the root the surplus word is not an argument at all.
-               :restrict-args (if (seq dispatch) msg (str "unknown command: " value))
+               ;; Only the root and the groups refuse surplus words, and in
+               ;; both the word was meant as a command.
+               :restrict-args (str "unknown command: "
+                                   (str/join " " (concat dispatch [value])))
                msg)))))
 
 (defn find-root

@@ -1,27 +1,28 @@
 ---
 id: lgu-01m28srsgket
 title: 'Key commands: legu key init, show and add'
-status: open
+status: closed
 type: feature
 priority: 2
 mode: afk
 created: '2026-09-11T17:55:41.203877010Z'
-updated: '2026-09-11T18:07:45.598695128Z'
+updated: '2026-09-11T19:11:34.993068895Z'
+closed: '2026-09-11T19:11:34.993068895Z'
 parent: lgu-01m28sh82tk1
 tags:
 - ready-for-agent
 - signing
 acceptance:
 - title: key init creates key and key.pub under XDG config, private file mode 0600, and refuses a second run
-  done: false
+  done: true
 - title: key show prints the signers line; key add creates or appends the signers file, is idempotent, and rejects a key under a second name
-  done: false
+  done: true
 - title: Help and completion list key and its subcommands; each subcommand supports --json
-  done: false
+  done: true
 - title: CLI suite covers the above with XDG_CONFIG_HOME inside the scratch repo
-  done: false
+  done: true
 - title: README documents the key commands and the signers-list format
-  done: false
+  done: true
 deps:
 - lgu-01m28tewtjn0
 ---
@@ -39,3 +40,9 @@ The three subcommands join the command table so `--help`, per-command help and s
 ### Blocked by
 
 None (can start immediately).
+
+## Notes
+
+**2026-09-11T19:11:34.993068895Z**
+
+legu key init writes an owner-only seed and key.pub under $XDG_CONFIG_HOME/legu (falling back to $HOME/.config/legu) and refuses a second run; key show prints the signers line; key add creates or appends .review/signers, idempotent, refusing a key bound to another name. Help, completion and --json cover all three; every CLI case runs with XDG_CONFIG_HOME inside its scratch repo.
