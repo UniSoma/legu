@@ -363,6 +363,73 @@
 (defn store-file [path]
   (fs/file *root* (store-path path)))
 
+(def readme-path
+  "The store's README, relative to the repo root (ADR-0017). Documentation
+   rather than state: legu writes it once and never reads it."
+  ".review/README.md")
+
+(def ^:private store-readme
+  "What the README says. It names no version and carries no date, since
+   nothing rewrites it once it is written."
+  "# legu's store
+
+This directory is legu's store. It records which regions of this repository a
+human has read, so that `legu coverage` can say how much of the code has been
+reviewed, and how much of what was reviewed has changed since.
+
+legu wrote this file when it created the store. It is yours now: edit it
+freely, legu will never touch it again.
+
+## What is in here
+
+- `sidecars/` — one file per source file, mirroring the source tree, holding
+  that file's review records and ticket references, one JSON object per line.
+- `ignore` — the files that do not count toward coverage: vendored code,
+  generated files, lockfiles, fixtures. Gitignore syntax, matched by git
+  itself, so it is inert outside a git repository.
+- `signers` — the keys whose signatures this store trusts. Its presence is
+  what makes every review record here a signed one.
+
+The sidecars arrive with the first mark. `ignore` and `signers` appear when
+you add them.
+
+## The CLI owns the sidecars
+
+Nothing but the `legu` command line tool writes under `sidecars/`. Use `legu
+mark` to record a region as read and `legu forget` to drop one; `legu --help`
+lists the rest. Editors and agents are welcome to read these files, but every
+change to one goes through the CLI, which is the only thing that knows how a
+record is superseded and re-anchored as the code moves.
+
+`ignore` and `signers` are yours to edit by hand.
+
+## It is committed on purpose
+
+Review state belongs to the repository rather than to one checkout, so this
+directory is committed alongside the code. To keep the sidecars out of your
+diffs, mark them generated in `.gitattributes` at the repository root:
+
+    .review/sidecars/** linguist-generated=true gitlab-generated=true
+
+GitHub and GitLab then collapse them in review views. Files at this
+directory's root stay in full, which is what you want for `signers`.
+
+<https://github.com/UniSoma/legu>
+")
+
+(defn ensure-store!
+  "Creates `dir`, one of the store's directories, and writes the README when
+   the store did not exist before this call. A store that already has one, or
+   that predates the README, is left as it is: the file is the reader's from
+   the moment legu writes it. A README that cannot be written is not worth
+   failing the write that triggered it."
+  [dir]
+  (let [new? (not (fs/exists? (fs/file *root* ".review")))]
+    (fs/create-dirs dir)
+    (when new?
+      (try (spit (fs/file *root* readme-path) store-readme)
+           (catch Exception _ nil)))))
+
 (def signers-path
   "The signers list, relative to the repo root (ADR-0016, ADR-0017). Its
    presence is what makes the store signed."
@@ -569,7 +636,7 @@
   (let [f (store-file path)]
     (if (and (empty? regions) (empty? tickets))
       (when (fs/exists? f) (fs/delete f))
-      (do (fs/create-dirs (fs/parent f))
+      (do (ensure-store! (fs/parent f))
           (spit f (render-sidecar state))))
     state))
 
@@ -1714,7 +1781,7 @@
     (when (and listed (not= reviewer (:reviewer listed)))
       (die (str signers-path " already lists this key as " (:reviewer listed))))
     (when-not listed
-      (fs/create-dirs (fs/parent f))
+      (ensure-store! (fs/parent f))
       ;; A hand-edited list may end without a newline, and appending straight
       ;; onto its last line would change that binding.
       (spit f (str (when-not (or (empty? text) (str/ends-with? text "\n")) "\n")

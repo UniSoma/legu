@@ -662,6 +662,36 @@
     (is (not (fs/exists? (fs/file dir ".review/alpha.txt.jsonl"))))
     (is (= [[1 2]] (map (juxt :start :end) (:regions (regions-json dir "alpha.txt")))))))
 
+(defn- store-readme [dir]
+  (fs/file dir ".review/README.md"))
+
+(deftest creating-the-store-writes-the-readme-that-says-what-it-is
+  (doseq [[what & args] [["a mark" "mark" "alpha.txt" "--reviewer" reviewer]
+                         ["key add" "key" "add"]]]
+    (let [dir (scratch-repo!)]
+      (when (= "key add" what)
+        (is (= 0 (:exit (legu! dir "key" "init")))))
+      (is (= 0 (:exit (apply legu! dir args))) what)
+      (is (fs/regular-file? (store-readme dir)) what)
+      (let [text (slurp (store-readme dir))]
+        (is (str/includes? text "legu's store") what)
+        (is (str/includes? text "https://github.com/UniSoma/legu") what)))))
+
+(deftest a-store-that-already-exists-never-grows-a-readme
+  (let [dir (scratch-repo!)]
+    (fs/create-dirs (fs/file dir ".review"))
+    (is (= 0 (:exit (legu! dir "mark" "alpha.txt" "--reviewer" reviewer))))
+    (is (fs/regular-file? (fs/file dir ".review/sidecars/alpha.txt.jsonl")))
+    (is (not (fs/exists? (store-readme dir))))))
+
+(deftest an-edited-readme-survives-every-later-write
+  (let [dir (scratch-repo!)]
+    (is (= 0 (:exit (legu! dir "mark" "alpha.txt:1-2" "--reviewer" reviewer))))
+    (spit (store-readme dir) "mine now\n")
+    (is (= 0 (:exit (legu! dir "mark" "sub/beta.txt" "--reviewer" reviewer))))
+    (is (= 0 (:exit (legu! dir "forget" "alpha.txt"))))
+    (is (= "mine now\n" (slurp (store-readme dir))))))
+
 (deftest the-ignore-list-is-read-from-the-store
   (let [dir (scratch-repo!)]
     (commit! dir {".review/ignore" "sub/\n"})

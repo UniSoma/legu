@@ -144,7 +144,9 @@ _Avoid_: progress, completion, score
 **Store**:
 The `.review/` directory at the repo root, committed alongside the code. It
 holds everything legu owns: the sidecars under `.review/sidecars/`, the ignore
-list at `.review/ignore` and the signers list at `.review/signers`.
+list at `.review/ignore`, the signers list at `.review/signers`, and a README
+written once when the store is created, which is documentation rather than
+state and which legu never reads.
 _Avoid_: database, index, cache
 
 **Sidecar**:

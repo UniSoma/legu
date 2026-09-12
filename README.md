@@ -320,9 +320,12 @@ Doom users are supported out of the box. See
 The store is `.review/` at the repo root, committed alongside the code. It
 holds everything legu owns: one JSON Lines sidecar per source file under
 `.review/sidecars/`, mirroring the source tree (`.review/sidecars/<path>.jsonl`),
-the ignore list at `.review/ignore` and the signers list at `.review/signers`
-([ADR-0017](docs/adr/0017-everything-legu-owns-lives-under-the-store.md)).
-Source files are never modified.
+the ignore list at `.review/ignore`, the signers list at `.review/signers` and
+a `.review/README.md` saying what the directory is
+([ADR-0017](docs/adr/0017-everything-legu-owns-lives-under-the-store.md)). legu
+writes that README when it creates the store and never touches it again, so
+whoever finds the directory in a diff can read what it is for; a store that
+already exists does not grow one. Source files are never modified.
 
 ```jsonl
 {"schema":4}
@@ -344,10 +347,19 @@ Timestamps are whole seconds. The source path is not stored: the sidecar's own
 location says it. An opaque record has no line range and no content hash, only
 `"opaque":true` and the file hash. A sidecar with nothing left in it is
 removed. Sidecars of any other schema are refused, not migrated
-([ADR-0015](docs/adr/0015-jsonl-sidecars-one-record-per-line.md)). The
-committed `.gitattributes` marks `.review/sidecars/**` as generated, which
-collapses sidecars in GitHub and GitLab review views. Files at the store's
-root, such as the ignore list and the signers list, show in full.
+([ADR-0015](docs/adr/0015-jsonl-sidecars-one-record-per-line.md)).
+
+Sidecars are for legu, not for review, so mark them generated in
+`.gitattributes` at the repo root:
+
+```
+.review/sidecars/** linguist-generated=true gitlab-generated=true
+```
+
+GitHub and GitLab then collapse them in review views. Files at the store's
+root, such as the ignore list and the signers list, show in full. legu does
+not write this line: it is one line in a file you own, and this repository's
+own `.gitattributes` is the example.
 
 legu skips a sidecar it cannot parse — most often one with a merge conflict
 left in it — instead of dying on it. One line that does not parse makes the
@@ -423,7 +435,8 @@ key a signers list names.
 
 `legu key show` prints the key's signers-list line: the public key, one space,
 then `git config user.name`. `legu key add` appends that line to
-`.review/signers`, and creates `.review/` and the file when they are missing. A
+`.review/signers`, and creates `.review/`, the file and the store's README when
+they are missing. A
 second `key add` with the same line changes nothing. When the list already has
 the key under another name, `key add` fails and names that name, because one key
 belongs to one reviewer. Both commands fail with no key, naming `legu key init`,
