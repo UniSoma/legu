@@ -6,7 +6,7 @@ type: feature
 priority: 1
 mode: afk
 created: '2026-09-12T00:44:02.229444143Z'
-updated: '2026-09-12T00:44:02.331835991Z'
+updated: '2026-09-12T00:46:01.132872069Z'
 tags:
 - ready-for-agent
 ---
@@ -55,7 +55,7 @@ Decisions are recorded in ADR-0018 (supersedes ADR-0004) and ADR-0019
 6. As a reader, I want a deletion at the end of a region to put its seam on the last remaining line of the region, so that the seam is always inside what I read.
 7. As a reader, I want a record whose every line was deleted to report stale at the clamped range it reports today, so that nothing silently disappears.
 8. As a reader, I want several hunks inside one region to produce one stale item each, so that `legu stale` is a list of places to go.
-9. As a reader, I want a reindent that moves a whole block together to stay reviewed, so that wrapping code in a new block does not ask me to re-read it.
+9. As a reader, I want a reindent that moves a whole block together to stay reviewed, so that wrapping code in a new block asks me to read the new line, not the block.
 10. As a reader, I want a reindent next to a real edit to stay reviewed for the reindented lines, so that the same whitespace edit is judged the same whether or not it is alone.
 11. As a reader of Python, YAML or Makefiles, I want a line that changed its indentation relative to the rest of the region to go stale, so that a change of meaning is never hidden by whitespace normalization.
 12. As a reader, I want trailing-whitespace edits, CRLF flips and a trailing-newline change never to count as changes, so that editor churn does not cost me a read.

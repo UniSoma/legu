@@ -12,8 +12,10 @@ rule becomes: trailing whitespace never matters, and leading whitespace
 matters relative to the region. Two texts are the same read when, after
 removing the leading whitespace common to every line of each, they trim
 equal at the end of each line. Wrapping a block in a new `def` or `if`, or
-pulling it out of one, shifts every line together and stays reviewed; moving
-one line to another level changes its offset from the rest and is stale. A
+pulling it out of one, shifts every line together and the block stays
+reviewed, while the inserted or removed line is stale under ADR-0018 as any
+other; moving one line to another level changes its offset from the rest
+and is stale, with no other character touched. A
 per-hunk equivalence test cannot see this, since a dedented block is a hunk
 whose lines are equal in isolation, so the fragment step judges hunks strictly
 on trailing whitespace, then checks once that the old text with only the
