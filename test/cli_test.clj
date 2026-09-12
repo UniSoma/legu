@@ -46,13 +46,19 @@
       (fs/create-dirs (fs/parent f))
       (spit f content))))
 
+(defn- scratch-dir!
+  "A fresh temp directory, registered for cleanup, with no git in it."
+  []
+  (let [dir (str (fs/create-temp-dir {:prefix "legu-cli-test"}))]
+    (swap! scratch-dirs conj dir)
+    dir))
+
 (defn- scratch-repo!
   "Creates a committed git tree in a fresh temp directory and returns its path.
    The reviewer, the file contents and the commit dates are fixed, so nothing
    asserted about a run depends on the ambient git config or the clock."
   []
-  (let [dir (str (fs/create-temp-dir {:prefix "legu-cli-test"}))]
-    (swap! scratch-dirs conj dir)
+  (let [dir (scratch-dir!)]
     (write-files! dir fixture)
     (git! dir "init" "-q")
     (git! dir "config" "user.name" reviewer)
@@ -650,6 +656,301 @@
         (is (= [false "legu metadata"] [(:eligible data) (:exclusion-reason data)])
             path)))
     (is (= 12 (:eligible-lines (coverage-json dir))))))
+
+;; ------------------------------------------------------- blobs at commits
+
+;; A record's file as it was at the commit it cites comes from one
+;; `git cat-file --batch` process per run. The framing is the whole risk: each
+;; blob arrives behind a header line and ahead of a newline the reader has to
+;; step over, so a case below gives the batch an empty blob, a blob holding a
+;; line shaped like a header, and a commit with no such object at all.
+
+(defn- stale-json [dir]
+  (json/parse-string (:out (legu! dir "stale" "--json")) true))
+
+(defn- anchors [dir path]
+  (for [r (:regions (regions-json dir path))]
+    [(:start r) (:end r) (:state r) (:reason r) (:moved r)]))
+
+(defn- framing-repo!
+  "A repo whose three records need three kinds of blob read at their commit:
+   an empty one, one git has no object for, and one holding a line shaped like
+   a cat-file header. They are read in path order, so the two that frame
+   oddly come first and a frame either of them mis-sizes takes the third
+   with it. The twin in twin.txt is the discriminating one: its
+   region is rewritten in the working tree and survives elsewhere, so legu
+   reports it stale only if the old text it read says the block already had a
+   twin at review time."
+  []
+  (let [dir (scratch-repo!)
+        twin (str "one\ntwo\ndeadbeef blob 7\nthree\n"
+                  "filler\n"
+                  "one\ntwo\ndeadbeef blob 7\nthree\n")]
+    (commit! dir {"empty.txt" "" "twin.txt" twin})
+    (write-files! dir {"empty.txt" "alpha\nbeta\ngamma\n"
+                       "new.txt" "n1\nn2\nn3\n"})
+    (doseq [target ["empty.txt:1-2" "twin.txt:1-4" "new.txt:1-2"]]
+      (legu! dir "mark" target "--reviewer" reviewer))
+    (write-files! dir {"empty.txt" "alpha\nbeta\ngamma\ndelta\n"
+                       "twin.txt" "zzz\nfiller\none\ntwo\ndeadbeef blob 7\nthree\n"
+                       "new.txt" "top\nn1\nn2\nn3\n"})
+    dir))
+
+(deftest reading-files-at-their-commits-spawns-one-batched-git-process
+  (let [dir (framing-repo!)
+        ;; under .git so the log is not a file of the tree legu reports on
+        log (str (fs/file dir ".git" "git-trace.log"))
+        _ (apply p/sh {:dir dir :out :string :err :string
+                       :extra-env {"XDG_CONFIG_HOME" (config-home dir)
+                                   "GIT_TRACE" log}}
+                 legu ["stale" "--json"])
+        lines (str/split-lines (slurp log))]
+    (is (= 1 (count (filter #(str/includes? % "cat-file --batch") lines))))
+    (is (= [] (filterv #(str/includes? % "git show ") lines)))))
+
+(deftest an-empty-a-missing-and-a-header-shaped-blob-all-come-out-whole
+  (let [dir (framing-repo!)]
+    (is (= [[1 2 "reviewed" "block moved" true]] (anchors dir "empty.txt")))
+    ;; ADR-0018: the four reviewed lines were rewritten as the one line
+    ;; "zzz", so the hunk's one new line is what went stale.
+    (is (= [[1 1 "stale" "content changed" false]] (anchors dir "twin.txt")))
+    (is (= [[2 3 "reviewed" "block moved" true]] (anchors dir "new.txt")))
+    (is (= [{:path "twin.txt" :start 1 :end 1
+             :reason "content changed" :state "stale"}]
+           (:stale (stale-json dir))))))
+
+(deftest records-across-two-commits-each-anchor-at-their-own-commit
+  (let [dir (scratch-repo!)
+        lines (fn [& ls] (str (str/join "\n" ls) "\n"))]
+    (commit! dir {"one.txt" (lines "a1" "a2" "a3")
+                  "two.txt" (lines "b1" "b2" "b3")})
+    (doseq [target ["one.txt:1-2" "two.txt:2-3"]]
+      (legu! dir "mark" target "--reviewer" reviewer))
+    (commit! dir {"one.txt" (lines "head" "a1" "a2" "a3")
+                  "three.txt" (lines "c1" "c2" "c3")})
+    ;; one.txt:1-2 at this commit is "head","a1" — a different region from the
+    ;; record above, which anchors at 2-3 now, so both survive and the same
+    ;; path is read at two commits.
+    (doseq [target ["one.txt:1-2" "three.txt:1-2"]]
+      (legu! dir "mark" target "--reviewer" reviewer))
+    ;; every file grows a line above the marks, each record shifting by what
+    ;; changed since its own commit
+    (write-files! dir {"one.txt" (lines "top" "head" "a1" "a2" "a3")
+                       "two.txt" (lines "top" "b1" "b2" "b3")
+                       "three.txt" (lines "top" "c1" "c2" "c3")})
+    (is (= [[2 3 "reviewed" nil true] [3 4 "reviewed" nil true]]
+           (anchors dir "one.txt")))
+    (is (= [[3 4 "reviewed" nil true]] (anchors dir "two.txt")))
+    (is (= [[2 3 "reviewed" nil true]] (anchors dir "three.txt")))
+    (is (= [] (:stale (stale-json dir))))
+    ;; Now edit inside every marked range, so each record is confirmed against
+    ;; its own commit's text and fragmented against it. A blob read for the
+    ;; wrong commit or the wrong path fails that confirmation, and the record
+    ;; falls back to whole-region stale instead.
+    (write-files! dir {"one.txt" (lines "top" "head" "a1" "a2 edited" "a3")
+                       "two.txt" (lines "top" "b1" "b2 edited" "b3")
+                       "three.txt" (lines "top" "c1" "c2 edited" "c3")})
+    ;; The 1-2 record of the second commit is "head","a1", which the edit
+    ;; below it leaves whole; the 1-2 record of the first commit is "a1","a2",
+    ;; which it splits.
+    (is (= [[2 3 "reviewed" nil true]
+            [3 3 "reviewed" nil true]
+            [4 4 "stale" "content changed" false]]
+           (anchors dir "one.txt")))
+    (is (= [[3 3 "stale" "content changed" false]
+            [4 4 "reviewed" nil true]]
+           (anchors dir "two.txt")))
+    (is (= [[2 2 "reviewed" nil true]
+            [3 3 "stale" "content changed" false]]
+           (anchors dir "three.txt")))))
+
+;; ---------------------------------------------------------------- staleness
+
+;; ADR-0018: once a record is confirmed against the file at the commit it
+;; cites, the lines each hunk touched are stale and the lines between the
+;; hunks stay reviewed where they landed. A case here names an edit and
+;; asserts the ranges and states reported for it, never the ladder that
+;; found them.
+
+(defn- numbered
+  "Lines `from`..`to`, each naming itself under `word`, so a reported range
+   can be read straight off the file it came from."
+  ([from to] (numbered "line" from to))
+  ([word from to]
+   (str/join (for [n (range from (inc to))] (str word " " n "\n")))))
+
+(defn- status-json [dir]
+  (json/parse-string (:out (legu! dir "status" "--json")) true))
+
+(defn- next-json [dir]
+  (json/parse-string (:out (legu! dir "next" "--json")) true))
+
+(defn- file-row [dir path]
+  (first (filter #(= path (:path %)) (:files (status-json dir)))))
+
+(defn- long-record!
+  "A repository whose long.txt is 150 numbered lines, every one of them
+   reviewed under one record."
+  []
+  (let [dir (scratch-repo!)]
+    (commit! dir {"long.txt" (numbered 1 150)})
+    (legu! dir "mark" "long.txt:1-150" "--reviewer" reviewer)
+    dir))
+
+(defn- edit-73-97!
+  "Rewrite long.txt's lines 73-97 in place, leaving 1-72 and 98-150 as read."
+  [dir]
+  (write-files! dir {"long.txt" (str (numbered 1 72) (numbered "edit" 73 97)
+                                     (numbered 98 150))}))
+
+(deftest an-edit-inside-a-region-leaves-only-the-edited-lines-stale
+  (let [dir (long-record!)]
+    (edit-73-97! dir)
+    (is (= [[1 72 "reviewed" nil false]
+            [73 97 "stale" "content changed" false]
+            [98 150 "reviewed" nil false]]
+           (anchors dir "long.txt")))
+    (is (= [{:path "long.txt" :start 73 :end 97
+             :reason "content changed" :state "stale"}]
+           (:stale (stale-json dir))))
+    (is (= {:path "long.txt" :total 150 :reviewed 125 :stale 25 :unreviewed 0
+            :ranges "1-72,98-150"}
+           (file-row dir "long.txt")))
+    (is (= "73-97" (:ranges (first (filter #(= "long.txt" (:path %))
+                                           (:next (next-json dir)))))))))
+
+(deftest two-edits-in-one-region-leave-one-stale-fragment-each
+  (let [dir (long-record!)]
+    (write-files! dir {"long.txt" (str (numbered 1 19) (numbered "edit" 20 21)
+                                       (numbered 22 59) (numbered "edit" 60 61)
+                                       (numbered 62 150))})
+    (is (= [[1 19 "reviewed" nil false]
+            [20 21 "stale" "content changed" false]
+            [22 59 "reviewed" nil false]
+            [60 61 "stale" "content changed" false]
+            [62 150 "reviewed" nil false]]
+           (anchors dir "long.txt")))
+    (is (= [{:path "long.txt" :start 20 :end 21
+             :reason "content changed" :state "stale"}
+            {:path "long.txt" :start 60 :end 61
+             :reason "content changed" :state "stale"}]
+           (:stale (stale-json dir))))
+    (is (= {:path "long.txt" :total 150 :reviewed 146 :stale 4 :unreviewed 0
+            :ranges "1-19,22-59,62-150"}
+           (file-row dir "long.txt")))))
+
+(deftest a-mark-over-part-of-a-stale-fragment-leaves-the-rest-stale
+  (let [dir (long-record!)]
+    (edit-73-97! dir)
+    (legu! dir "mark" "long.txt:73-80" "--reviewer" reviewer)
+    ;; Staleness is per line: `stale` names what is left, the same lines
+    ;; `status` and `next` count.
+    (is (= [{:path "long.txt" :start 81 :end 97
+             :reason "content changed" :state "stale"}]
+           (:stale (stale-json dir))))
+    (is (= {:path "long.txt" :total 150 :reviewed 133 :stale 17 :unreviewed 0
+            :ranges "1-80,98-150"}
+           (file-row dir "long.txt")))
+    (is (= "81-97" (:ranges (first (filter #(= "long.txt" (:path %))
+                                           (:next (next-json dir)))))))))
+
+(deftest an-edit-that-grows-or-shrinks-moves-the-lines-below-it
+  (doseq [[replacement stale-end below-start] [[(numbered "edit" 1 30) 102 103]
+                                               [(numbered "edit" 1 20) 92 93]]]
+    (let [dir (long-record!)]
+      (write-files! dir {"long.txt" (str (numbered 1 72) replacement
+                                         (numbered 98 150))})
+      (is (= [[1 72 "reviewed" nil false]
+              [73 stale-end "stale" "content changed" false]
+              [below-start (+ below-start 52) "reviewed" nil true]]
+             (anchors dir "long.txt"))
+          (str "stale through line " stale-end)))))
+
+(deftest an-insertion-inside-a-region-leaves-the-lines-below-it-reviewed
+  (let [dir (long-record!)]
+    (write-files! dir {"long.txt" (str (numbered 1 80) (numbered "added" 1 3)
+                                       (numbered 81 150))})
+    (is (= [[1 80 "reviewed" nil false]
+            [81 83 "stale" "content changed" false]
+            [84 153 "reviewed" nil true]]
+           (anchors dir "long.txt")))
+    (is (= [{:path "long.txt" :start 81 :end 83
+             :reason "content changed" :state "stale"}]
+           (:stale (stale-json dir))))
+    ;; every piece names the one record it came from
+    (is (= [{:path "long.txt" :start 1 :end 150 :commit nil :timestamp nil
+             :reviewer reviewer}]
+           (distinct (for [r (:regions (regions-json dir "long.txt"))]
+                       (-> (:original r)
+                           (assoc :commit nil :timestamp nil))))))))
+
+(deftest an-edit-outside-a-region-leaves-the-whole-record-reviewed
+  (doseq [[what file] [["above" (str (numbered "edit" 1 12) (numbered 13 150))]
+                       ["right before" (str (numbered 1 49) (numbered "added" 1 2)
+                                            (numbered 50 150))]
+                       ["right after" (str (numbered 1 100) (numbered "added" 1 2)
+                                           (numbered 101 150))]]]
+    (let [dir (scratch-repo!)]
+      (commit! dir {"long.txt" (numbered 1 150)})
+      (legu! dir "mark" "long.txt:50-100" "--reviewer" reviewer)
+      (write-files! dir {"long.txt" file})
+      (is (= (if (= "right before" what)
+               [[52 102 "reviewed" nil true]]
+               [[50 100 "reviewed" nil false]])
+             (anchors dir "long.txt"))
+          what))))
+
+(deftest marking-the-stale-lines-again-clears-them-and-keeps-both-records
+  (let [dir (long-record!)]
+    (edit-73-97! dir)
+    (is (= 0 (:exit (legu! dir "mark" "long.txt:73-97" "--reviewer" reviewer))))
+    (is (= [] (:stale (stale-json dir))))
+    (is (= [150 0 0] ((juxt :reviewed :stale :unreviewed) (file-row dir "long.txt"))))
+    ;; the old record still answers for the 125 lines nobody read again, and
+    ;; still says the hunk changed under it: the new record is what reviews
+    ;; those lines, by the rule that a reviewed line beats a stale one
+    (is (= [[1 72 "reviewed"] [73 97 "stale"] [73 97 "reviewed"]
+            [98 150 "reviewed"]]
+           (map #(take 3 %) (anchors dir "long.txt"))))
+    (is (= 2 (count (rest (sidecar-lines dir "long.txt")))))))
+
+(deftest a-region-cut-and-pasted-elsewhere-in-its-file-is-moved-not-stale
+  (let [dir (scratch-repo!)]
+    (commit! dir {"long.txt" (numbered 1 150)})
+    (legu! dir "mark" "long.txt:50-60" "--reviewer" reviewer)
+    (write-files! dir {"long.txt" (str (numbered 1 49) (numbered 61 150)
+                                       (numbered 50 60))})
+    (is (= [[140 150 "reviewed" "block moved" true]] (anchors dir "long.txt")))
+    (is (= [] (:stale (stale-json dir))))))
+
+(deftest a-ticket-reference-reports-its-whole-region-not-the-hunk
+  (let [dir (long-record!)]
+    (legu! dir "ticket" "long.txt:1-150" "T-1")
+    (edit-73-97! dir)
+    (let [data (regions-json dir "long.txt")]
+      (is (= 3 (count (:regions data))))
+      (is (= [{:start 1 :end 150 :state "stale" :ticket "T-1"}]
+             (map #(select-keys % [:start :end :state :ticket]) (:tickets data)))))))
+
+(deftest a-record-no-commit-confirms-goes-stale-whole
+  (let [dir (scratch-repo!)]
+    (commit! dir {"long.txt" (numbered 1 150)})
+    ;; the mark reads a working tree the commit it cites never held, so the
+    ;; diff against that commit is no evidence about what was read
+    (write-files! dir {"long.txt" (str (numbered 1 40) (numbered "draft" 1 5)
+                                       (numbered 41 150))})
+    (legu! dir "mark" "long.txt:1-155" "--reviewer" reviewer)
+    (write-files! dir {"long.txt" (str (numbered 1 40) (numbered "draft" 1 5)
+                                       (numbered 41 99) (numbered "edit" 100 101)
+                                       (numbered 102 150))})
+    (is (= ["stale"] (map #(nth % 2) (anchors dir "long.txt"))))))
+
+(deftest a-store-with-no-git-reports-the-whole-region-stale
+  (let [dir (scratch-dir!)]
+    (write-files! dir {"long.txt" (numbered 1 150)})
+    (is (= 0 (:exit (legu! dir "mark" "long.txt:1-150" "--reviewer" reviewer))))
+    (edit-73-97! dir)
+    (is (= [[1 150 "stale" "content changed" false]] (anchors dir "long.txt")))))
 
 ;; ---------------------------------------------------------------- keys
 

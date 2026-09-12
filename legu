@@ -240,11 +240,85 @@
         (swap! worktree-cache assoc path c)
         c)))
 
-(defn read-at-commit [commit path]
+;; [commit path] -> the file's text at that commit, for every pair legu has
+;; asked git about. An absent object is cached as nil, so a lookup tells a
+;; pair nobody asked for from one git has no object for.
+(def ^:private blob-cache (atom {}))
+
+(defn- parse-batch
+  "The texts `git cat-file --batch` answered with, in the order they were
+   asked for. Each object arrives as a header line, exactly as many bytes as
+   the header announces, and a newline; an object git does not have is a
+   header line on its own. `out` is decoded latin-1, so a byte is a character
+   and the announced length indexes the string. The type and the length are
+   matched at the end of the header: a missing object's header echoes the
+   request, and a path may hold spaces."
+  [out]
+  (loop [i 0 acc []]
+    (if (>= i (count out))
+      acc
+      (let [nl (or (str/index-of out "\n" i) (count out))
+            [_ kind size] (re-find #" (blob|tree|commit|tag) (\d+)$" (subs out i nl))]
+        (if size
+          (let [from (inc nl)
+                to (min (count out) (+ from (parse-long size)))]
+            (recur (inc to) (conj acc (when (= "blob" kind) (subs out from to)))))
+          (recur (inc nl) (conj acc nil)))))))
+
+(defn- read-blobs
+  "The text of each [commit path] pair at its commit, from one git process,
+   nil where git has no such object. Read as bytes and decoded latin-1 like
+   every other file legu reads, so a byte that is not UTF-8 round-trips."
+  [pairs]
+  (let [{:keys [exit out]}
+        (p/sh {:dir *root* :out :bytes :err :string :continue true
+               :in (str/join (for [[commit path] pairs] (str commit ":" path "\n")))}
+              "git" "cat-file" "--batch")
+        texts (if (zero? exit) (parse-batch (String. ^bytes out ENC)) [])]
+    (take (count pairs) (concat texts (repeat nil)))))
+
+(defn- needs-blob?
+  "Will anchoring `record` want its file as it was at the commit it cites?
+   Whenever the file changed since the review: the old text is what a rename
+   or an added-file candidate is diffed against, and what vetoes a moved block
+   that already had a twin. Unlike `needs-hunks?` this asks nothing of the
+   path, which may be gone from the working tree and from git's index and
+   still be the path the old text lives at."
+  [{:keys [path commit opaque file-hash]}]
+  (and *git?*
+       (not opaque)
+       (not= file-hash (:hash (read-worktree path)))
+       (re-matches #"[0-9a-f]{7,64}" (str commit))))
+
+(defn- uncached-pairs
+  "The distinct [commit path] pairs of `records` that `want?` asks for and
+   `cache` does not hold yet."
+  [records want? cache]
+  (->> records
+       (filter want?)
+       (map (juxt :commit :path))
+       distinct
+       (remove #(contains? @cache %))))
+
+(defn fetch-blobs!
+  "Read the file each of `records` cites at the commit it cites, all in one
+   `git cat-file --batch`, so that no record spawns a process of its own. The
+   requests go over stdin, which no command-line limit applies to."
+  [records]
+  (let [pairs (vec (uncached-pairs records needs-blob? blob-cache))]
+    (when (seq pairs)
+      (swap! blob-cache into (map vector pairs (read-blobs pairs))))))
+
+(defn read-at-commit
+  "The text of `path` at `commit`, read once per pair per run. A pair no
+   `fetch-blobs!` asked for pays for a batch of its own rather than going
+   without, so a caller's answer never depends on having been prefetched."
+  [commit path]
   (when *git?*
-    (let [{:keys [exit out]} (p/sh {:dir *root* :out :bytes :err :string :continue true}
-                                   "git" "show" (str commit ":" path))]
-      (when (zero? exit) (String. ^bytes out ENC)))))
+    (let [k [commit path]]
+      (when-not (contains? @blob-cache k)
+        (swap! blob-cache assoc k (first (read-blobs [k]))))
+      (get @blob-cache k))))
 
 ;; ---------------------------------------------------------------- store
 
@@ -580,12 +654,7 @@
    process of its own. The pathspec holds only those files, so a mark pays
    for the records it anchors and no others."
   [records]
-  (let [wanted (->> records
-                    (filter needs-hunks?)
-                    (map (juxt :commit :path))
-                    distinct
-                    (remove #(contains? @commit-hunks %))
-                    (group-by first))]
+  (let [wanted (group-by first (uncached-pairs records needs-hunks? commit-hunks))]
     (doseq [[commit pairs] wanted
             paths (runs-within 100000 (map second pairs))]
       (let [by-path (diff-by-path
@@ -594,6 +663,14 @@
                                 "--src-prefix=a/" "--dst-prefix=b/" commit "--" paths)
                          ""))]
         (swap! commit-hunks into (for [p paths] [[commit p] (get by-path p)]))))))
+
+(defn prefetch!
+  "Ask git once for everything anchoring `records` will want: the hunks since
+   each cited commit and the file as it was at it. Every caller that anchors a
+   batch goes through here, so a new cache is wired in one place."
+  [records]
+  (fetch-hunks! records)
+  (fetch-blobs! records))
 
 (defn project-range
   "Shift [start end] across hunks. :dirty? when a hunk touched the region itself."
@@ -654,9 +731,80 @@
   [index want cap]
   (vec (take cap (get index want))))
 
+(defn- insertion?
+  "Did this hunk write lines without consuming any? Git names such a hunk by
+   the old line it follows, so an insertion sits between `old-start` and the
+   line after it, not on `old-start` itself. That is why the three predicates
+   below ask `< end` of an insertion where they ask `<= end` of a hunk with
+   old lines: an insertion after the region's last line is outside it."
+  [{:keys [old-count]}]
+  (zero? old-count))
+
+(defn- old-last
+  "The last old line this hunk consumed."
+  [{:keys [old-start old-count]}]
+  (+ old-start old-count -1))
+
+(defn- before-region?
+  [{:keys [old-start] :as hunk} start]
+  (if (insertion? hunk)
+    (< old-start start)
+    (< (old-last hunk) start)))
+
+(defn- inside-region?
+  [{:keys [old-start] :as hunk} start end]
+  (and (>= old-start start)
+       (if (insertion? hunk) (< old-start end) (<= (old-last hunk) end))))
+
+(defn- touches-region?
+  [{:keys [old-start] :as hunk} start end]
+  (if (insertion? hunk)
+    (and (>= old-start start) (< old-start end))
+    (and (<= old-start end) (>= (old-last hunk) start))))
+
+(defn- fragments-of
+  "ADR-0018: the fragments the region [start end] now falls into, given the
+   `hunks` between the file as it was reviewed and the file now. Each hunk
+   inside the region is stale at the lines it wrote; the run of lines between
+   two hunks is still reviewed, at the location the hunks before it left it,
+   and moved when that location is not where it was read.
+   nil where the region holds a hunk this rule cannot split: a pure deletion,
+   whose seam is a rule of its own, or a hunk crossing the region's boundary,
+   which has no line-to-line mapping inside it. The caller then reports the
+   whole region stale."
+  [hunks start end]
+  (let [inside (sort-by :old-start (filter #(touches-region? % start end) hunks))]
+    (when (and (seq inside)
+               (every? #(and (pos? (:new-count %)) (inside-region? % start end)) inside))
+      (loop [hs inside
+             read-from start
+             offset (reduce + 0 (for [h hunks :when (before-region? h start)]
+                                  (- (:new-count h) (:old-count h))))
+             acc []]
+        (if-let [{:keys [old-start old-count new-start new-count] :as hunk}
+                 (first hs)]
+          (let [read-to (if (insertion? hunk) old-start (dec old-start))
+                acc (cond-> acc
+                      (<= read-from read-to)
+                      (conj {:state :reviewed :start (+ read-from offset)
+                             :end (+ read-to offset)
+                             :moved? (not (zero? offset))}))]
+            (recur (rest hs)
+                   (if (insertion? hunk) (inc old-start) (inc (old-last hunk)))
+                   (+ offset (- new-count old-count))
+                   (conj acc {:state :stale :start new-start
+                              :end (+ new-start new-count -1)
+                              :reason "content changed"})))
+          (cond-> acc
+            (<= read-from end)
+            (conj {:state :reviewed :start (+ read-from offset) :end (+ end offset)
+                   :moved? (not (zero? offset))})))))))
+
 (defn try-anchor
   "Locate a record's reviewed content inside file `p`, whose content is `cur`.
-   Returns a :reviewed or a :stale result."
+   Returns a :reviewed or a :stale result, the latter carrying `:fragments`
+   where the record confirms against the file at its commit and the diff says
+   which of its lines changed."
   [{:keys [start end commit content-hash file-hash path]} p cur]
   (if (= (:hash cur) file-hash)
     ;; byte-identical to review time: nothing to project
@@ -687,10 +835,23 @@
              :moved? true :reason "block moved"}
             (let [total (count new-lines)
                   s (max 1 (min (if in-bounds? ns* start) total))
-                  e (max s (min (if in-bounds? ne end) total))]
-              {:state :stale :path p
-               :start (when (pos? total) s) :end (when (pos? total) e)
-               :reason "content changed"})))))))
+                  e (max s (min (if in-bounds? ne end) total))
+                  ;; ADR-0018: the diff is only evidence about this record
+                  ;; once the file at the commit it cites holds the content it
+                  ;; signed for. A record no commit confirms goes stale whole.
+                  old-lines (when @old-text (lines-of @old-text))
+                  confirmed? (and (seq hunks)
+                                  old-lines
+                                  (<= end (count old-lines))
+                                  (= content-hash
+                                     (norm-hash (subvec old-lines (dec start) end))))
+                  frags (when confirmed? (fragments-of hunks start end))]
+              (cond-> {:state :stale :path p
+                       :start (when (pos? total) s) :end (when (pos? total) e)
+                       :reason "content changed"}
+                frags (assoc :fragments
+                             (mapv #(cond-> % (not= p path) (assoc :moved? true))
+                                   frags))))))))))
 
 (defn- candidate-paths
   "Where a record's file may have gone since `commit`. :renamed is git's own
@@ -721,7 +882,8 @@
   "Current state of a stored record against the working tree. A file that
    changed is diffed through `fetch-hunks!` when a caller ran it over this
    record first, as `resolve-regions` does, and on its own otherwise.
-   => {:state :reviewed|:stale|:missing :path :start :end :moved? :reason}"
+   => {:state :reviewed|:stale|:missing :path :start :end :moved? :reason},
+   and :fragments where the record's lines did not all change together."
   [{:keys [path start end opaque file-hash commit] :as record}]
   (let [at-old (read-worktree path)
         gone? (not (#{:text :binary} (:kind at-old)))
@@ -760,10 +922,10 @@
 
 (defn resolve-regions
   "`resolve-region` of each record, in order, with their files diffed a
-   commit at a time first. Lazy, so a caller that folds the results never
-   holds all of them at once."
+   commit at a time and read at their commits in one batch first. Lazy, so a
+   caller that folds the results never holds all of them at once."
   [records]
-  (fetch-hunks! records)
+  (prefetch! records)
   (map resolve-region records))
 
 ;; ---------------------------------------------------------------- model
@@ -819,15 +981,24 @@
                        :binary 1
                        0)})))))
 
+(defn- fragments-or-whole
+  "What a resolved record answers for: its fragments where the lines it covers
+   did not all change together, and the record's own range otherwise."
+  [res]
+  (or (seq (:fragments res)) [res]))
+
 (defn resolved-by-path
   "path -> {:reviewed [[start end] ...] :stale [[start end] ...]} at current
-   locations, one range per record, overlapping as the records do."
+   locations, one range per fragment, overlapping as the records do."
   []
   (reduce (fn [acc res]
             (if (= :missing (:state res))
               acc
-              (update-in acc [(:path res) (:state res)] (fnil conj [])
-                         (if (:start res) [(:start res) (:end res)] [1 1]))))
+              (reduce (fn [acc {:keys [state start end]}]
+                        (update-in acc [(:path res) state] (fnil conj [])
+                                   (if start [start end] [1 1])))
+                      acc
+                      (fragments-or-whole res))))
           {}
           (resolve-regions (records))))
 
@@ -836,18 +1007,20 @@
 ;; of boxed line numbers as sets, and a few hundred thousand pairs as ranges.
 
 (defn- merge-ranges
-  "Sorted, disjoint ranges covering the lines of `ivs` that fall inside
-   1..total. Ranges that touch are joined, as `fmt-ranges` prints them."
-  [ivs total]
-  (reduce (fn [acc [s e]]
-            (let [s (max 1 s) e (min total e)]
-              (cond
-                (> s e) acc
-                (and (seq acc) (<= s (inc (second (peek acc)))))
-                (conj (pop acc) [(first (peek acc)) (max e (second (peek acc)))])
-                :else (conj acc [s e]))))
-          []
-          (sort ivs)))
+  "Sorted, disjoint ranges covering the lines of `ivs`, clamped to 1..total
+   when a ceiling is given. Ranges that touch are joined, as `fmt-ranges`
+   prints them."
+  ([ivs] (merge-ranges ivs Long/MAX_VALUE))
+  ([ivs total]
+   (reduce (fn [acc [s e]]
+             (let [s (max 1 s) e (min total e)]
+               (cond
+                 (> s e) acc
+                 (and (seq acc) (<= s (inc (second (peek acc)))))
+                 (conj (pop acc) [(first (peek acc)) (max e (second (peek acc)))])
+                 :else (conj acc [s e]))))
+           []
+           (sort ivs))))
 
 (defn- subtract-ranges
   "The lines of the merged ranges `ivs` outside the merged `minus`."
@@ -1349,7 +1522,8 @@
                            :let [state (read-state sidecar)]
                            :when (and state (can-hold-obsolete? (:path region) sidecar))]
                        state))]
-    (fetch-hunks! (for [state holders r (kind state)] (assoc r :path (:path state))))
+    (let [rs (vec (for [state holders r (kind state)] (assoc r :path (:path state))))]
+      (prefetch! rs))
     (doseq [{sidecar :path :as state} holders
             :let [keep? #(not (obsolete? region (assoc % :path sidecar)))
                   pruned (update state kind #(vec (filter keep? %)))]
@@ -1407,7 +1581,9 @@
         dropped (atom 0)]
     (assert-readable! path)
     (parse-store!)
-    (when start (fetch-hunks! (concat (records) (ticket-records))))
+    (when start
+      (let [rs (vec (concat (records) (ticket-records)))]
+        (prefetch! rs)))
     (doseq [sidecar (stored-paths)
             :let [state (read-state sidecar)]
             :when state
@@ -1472,6 +1648,19 @@
              :original (original-provenance stored)}
       (contains? stored :ticket) (assoc :ticket (:ticket stored)))))
 
+(defn- current-records
+  "One item per fragment of a record's current anchor, each carrying the whole
+   record's provenance and its own location, so a reader of one line is told
+   about the fragment that line falls in."
+  [{:keys [stored current]}]
+  (mapv (fn [fragment]
+          (current-record {:stored stored
+                           :current (merge (dissoc current :fragments)
+                                           (select-keys fragment
+                                                        [:state :start :end :moved?])
+                                           {:reason (:reason fragment)})}))
+        (fragments-or-whole current)))
+
 (defn- path-eligibility [path ignored]
   (cond
     (in-store? path) [false "legu metadata"]
@@ -1525,7 +1714,7 @@
             opaque (or (= :binary (:kind cur))
                        (and (= :text (:kind cur)) (zero? (:line-count cur))))
             regions (->> review-records
-                         (map current-record)
+                         (mapcat current-records)
                          (sort-by (juxt #(or (:start %) 0)
                                         #(get-in % [:original :timestamp])))
                          vec)
@@ -1657,20 +1846,48 @@
                   (render-files files hidden)))
             (render-tickets tickets)))))
 
+(defn- stale-and-reviewed
+  "The stale fragments of every record, and the reviewed ranges of each path, in
+   one pass over the store: anchoring a file's records twice would hash its
+   windows again for every record read out of order."
+  [resolutions]
+  (reduce (fn [acc res]
+            (reduce (fn [acc {:keys [state start end reason]}]
+                      (if (= :reviewed state)
+                        (cond-> acc
+                          start (update-in [:reviewed (:path res)] (fnil conj [])
+                                           [start end]))
+                        (update acc :stale conj
+                                {:path (:path res) :start start :end end
+                                 :reason reason :state (name state)})))
+                    acc
+                    (fragments-or-whole res)))
+          {:stale [] :reviewed {}}
+          resolutions))
+
 (defn cmd-stale [{:keys [opts]}]
-  (let [rs (->> (resolve-regions (records))
-                (filter #(#{:stale :missing} (:state %)))
+  (let [{:keys [stale reviewed]} (stale-and-reviewed (resolve-regions (records)))
+        ;; Staleness is per line (CONTEXT.md), so a fragment a later read
+        ;; covers in part is reported at the lines that read left over, not
+        ;; whole and not dropped. `subtract-ranges` is the rule the numbers
+        ;; and `next` already follow; it wants its `minus` sorted and disjoint.
+        merged (into {} (for [[path ivs] reviewed] [path (merge-ranges ivs)]))
+        uncovered (fn [{:keys [path start end] :as item}]
+                    (if-not start
+                      [item]
+                      (for [[s e] (subtract-ranges [[start end]] (get merged path))]
+                        (assoc item :start s :end e))))
+        rs (->> stale
+                (mapcat uncovered)
                 (sort-by (juxt :path #(or (:start %) 0))))]
-    (emit opts {:stale (mapv #(-> (select-keys % [:path :start :end :reason])
-                                  (assoc :state (name (:state %))))
-                             rs)}
+    (emit opts {:stale (mapv #(select-keys % [:path :start :end :reason :state]) rs)}
           (fn [_]
             (if (empty? rs)
               (println "nothing stale")
               (doseq [r rs]
                 (println (format "%s%s  %s  (%s)"
                                  (:path r) (fmt-region r)
-                                 (name (:state r)) (:reason r)))))))))
+                                 (:state r) (:reason r)))))))))
 
 (defn- reviewed-paths
   "Paths carrying a reviewed line, current or stale, at their location now."

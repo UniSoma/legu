@@ -933,9 +933,12 @@ record counts only where no reviewed one covers it, and the ranges
     (legu-test--legu "mark" "a.txt:9-10")
     (legu-test--legu "mark" "a.txt:12-16")
     (with-temp-file (expand-file-name "a.txt" root)
-      (insert (legu-test--lines 13) "\nchanged\n"
-              (mapconcat (lambda (i) (format "line %d" i)) (number-sequence 15 20) "\n")
+      (insert (legu-test--lines 13) "\nchanged\nline 15\naltered\n"
+              (mapconcat (lambda (i) (format "line %d" i)) (number-sequence 17 20) "\n")
               "\n"))
+    ;; Lines 14 and 16 of the 12-16 record changed; the mark below re-reads 16
+    ;; and leaves 14, so the stale fragment that a reviewed record covers has
+    ;; to drop out and the one it does not has to stay.
     (legu-test--legu "mark" "a.txt:15-18")
     (let ((file (car (alist-get 'files (legu--parse-json
                                         (nth 1 (legu-test--legu "status" "--json"))))))
@@ -943,17 +946,20 @@ record counts only where no reviewed one covers it, and the ranges
                                          (nth 1 (legu-test--legu "next" "--json"))))))
           (coverage (legu--parse-json (nth 1 (legu-test--legu "coverage" "--json")))))
       (should (equal "a.txt" (alist-get 'path file)))
-      (should (= 14 (alist-get 'reviewed file)))
-      (should (= 3 (alist-get 'stale file)))
+      ;; ADR-0018: of the 12-16 record only 14 and 16 changed, so 12, 13 and
+      ;; 15 stay reviewed on its evidence, and 16 is reviewed again by the
+      ;; later mark.
+      (should (= 16 (alist-get 'reviewed file)))
+      (should (= 1 (alist-get 'stale file)))
       (should (= 3 (alist-get 'unreviewed file)))
-      (should (equal "1-10,15-18" (alist-get 'ranges file)))
+      (should (equal "1-10,12-13,15-18" (alist-get 'ranges file)))
       (should (equal "a.txt" (alist-get 'path queued)))
-      (should (= 3 (alist-get 'stale queued)))
+      (should (= 1 (alist-get 'stale queued)))
       (should (= 3 (alist-get 'unreviewed queued)))
-      (should (equal "11-14,19-20" (alist-get 'ranges queued)))
+      (should (equal "11,14,19-20" (alist-get 'ranges queued)))
       (should (= 20 (alist-get 'eligible-lines coverage)))
-      (should (= 14 (alist-get 'reviewed coverage)))
-      (should (= 3 (alist-get 'stale coverage)))
+      (should (= 16 (alist-get 'reviewed coverage)))
+      (should (= 1 (alist-get 'stale coverage)))
       (should (= 3 (alist-get 'unreviewed coverage))))))
 
 (ert-deftest legu-test-integration-warning-on-stderr-is-not-a-failure ()
@@ -1257,11 +1263,19 @@ no evidence that the region moved."
         (insert (legu-test--numbered 1 4)
                 "block 1\nblock 2\nchanged\nblock 4\nblock 5\nblock 6\n"
                 (legu-test--numbered 11 19) block (legu-test--numbered 26 30)))
-      (let ((region (car (alist-get 'regions (legu-test--regions "a.txt")))))
-        (should (equal "stale" (alist-get 'state region)))
-        (should (= 5 (alist-get 'start region)))
-        (should (= 10 (alist-get 'end region)))
-        (should (equal "content changed" (alist-get 'reason region)))))))
+      (let ((regions (alist-get 'regions (legu-test--regions "a.txt"))))
+        ;; ADR-0018: the one rewritten line is stale and the rest of the
+        ;; block stays reviewed where it is.  Had the twin been read as a
+        ;; move, the record would report one reviewed region, "block moved".
+        (should (equal '(("reviewed" 5 6) ("stale" 7 7) ("reviewed" 8 10))
+                       (mapcar (lambda (r) (list (alist-get 'state r)
+                                                 (alist-get 'start r)
+                                                 (alist-get 'end r)))
+                               regions)))
+        (should-not (seq-find (lambda (r) (equal "block moved"
+                                                 (alist-get 'reason r)))
+                              regions))
+        (should (equal "content changed" (alist-get 'reason (nth 1 regions))))))))
 
 (ert-deftest legu-test-integration-regions-distinguishes-stale-and-missing ()
   (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 20) "\n"))
@@ -1816,13 +1830,15 @@ git, the CLI or `legu-mode'."
                        (null (alist-get 'stale
                                         (legu--parse-json
                                          (nth 1 (legu-test--legu "stale" "--json"))))))))
+            ;; ADR-0018: the mark covers the stale line alone, so it does
+            ;; not retire the record that still vouches for the other ten.
             (let ((records (plist-get (legu-sidecar-records root "a.txt") :regions)))
-              (should (= 1 (length records)))))
+              (should (= 2 (length records)))))
         (kill-buffer buffer)))))
 
 (defun legu-test--push-a-txt-down-and-change-it (root)
   "Push the 10-20 region of a.txt down a line and change a line inside it.
-The record then anchors, stale, at 11-21."
+The record then anchors at 11-21, stale at the inserted line 16 alone."
   (with-temp-file (expand-file-name "a.txt" root)
     (insert (concat (legu-test--lines 40) "\n"))
     (goto-char (point-min)) (forward-line 2) (insert "above\n")
@@ -1840,22 +1856,23 @@ The record then anchors, stale, at 11-21."
     (legu-test--legu "mark" "a.txt:10-20")
     (legu-test--push-a-txt-down-and-change-it root)
     (let ((region (car (legu-test--stale-regions root))))
-      (should (= 11 (alist-get 'start region)))
-      (should (= 21 (alist-get 'end region))))
+      (should (= 16 (alist-get 'start region)))
+      (should (= 16 (alist-get 'end region))))
     (legu-test--legu "mark" "a.txt:10-22")
     (should (null (legu-test--stale-regions root)))
     (should (= 1 (length (plist-get (legu-sidecar-records root "a.txt") :regions))))))
 
-(ert-deftest legu-test-integration-a-partial-re-read-leaves-the-old-record ()
-  ;; A partly re-read region is not a read region: the old record stays and
-  ;; `legu stale' keeps naming its whole range.
+(ert-deftest legu-test-integration-a-mark-over-part-of-a-record-keeps-it-and-its-stale-lines ()
+  ;; A mark that covers part of a record does not retire it: the record is the
+  ;; only evidence for the lines nobody read again, and the lines a hunk
+  ;; changed stay stale until they are read (ADR-0018).
   (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 40) "\n")))
     (legu-test--legu "mark" "a.txt:10-20")
     (legu-test--push-a-txt-down-and-change-it root)
     (legu-test--legu "mark" "a.txt:11-15")
     (let ((region (car (legu-test--stale-regions root))))
-      (should (= 11 (alist-get 'start region)))
-      (should (= 21 (alist-get 'end region))))
+      (should (= 16 (alist-get 'start region)))
+      (should (= 16 (alist-get 'end region))))
     (should (= 2 (length (plist-get (legu-sidecar-records root "a.txt") :regions))))))
 
 (ert-deftest legu-test-integration-a-whole-file-mark-supersedes-a-record-anchored-elsewhere ()
@@ -2059,8 +2076,28 @@ before review records: everything a rewrite must put straight."
       (funcall expect "binary.dat" "reviewed" nil nil nil t)
       (funcall expect "empty.txt" "reviewed" nil nil nil t)
       (funcall expect "moved.txt" "reviewed" 12 22 t nil)
-      (funcall expect "stale.txt" "stale" 10 20 nil nil)
-      (funcall expect "gone.txt" "missing" nil nil nil nil))
+      (funcall expect "gone.txt" "missing" nil nil nil nil)
+      ;; ADR-0018: the record fragments around the line that changed, each
+      ;; piece carrying the whole record's provenance.  The ticket reference
+      ;; is a pointer to a place, not evidence of a read, so it does not.
+      (let* ((data (legu-test--regions "stale.txt"))
+             (ticket (car (alist-get 'tickets data))))
+        (should (equal '(("reviewed" 10 14 nil) ("stale" 15 15 nil)
+                         ("reviewed" 16 21 t))
+                       (mapcar (lambda (r) (list (alist-get 'state r)
+                                                 (alist-get 'start r)
+                                                 (alist-get 'end r)
+                                                 (alist-get 'moved r)))
+                               (alist-get 'regions data))))
+        (dolist (r (alist-get 'regions data))
+          (should (equal "stale.txt" (alist-get 'path (alist-get 'original r))))
+          (should (= 10 (alist-get 'start (alist-get 'original r))))
+          (should (= 20 (alist-get 'end (alist-get 'original r)))))
+        (should (= 1 (length (alist-get 'tickets data))))
+        (should (equal "stale" (alist-get 'state ticket)))
+        (should (= 10 (alist-get 'start ticket)))
+        (should (= 20 (alist-get 'end ticket)))
+        (should (equal "T-1" (alist-get 'ticket ticket)))))
     (let ((stale (legu-test--stale-regions root)))
       (should (equal '("gone.txt" "stale.txt")
                      (sort (mapcar (lambda (r) (alist-get 'path r)) stale) #'string<))))
@@ -2071,7 +2108,8 @@ before review records: everything a rewrite must put straight."
       (should (= 1 (alist-get 'reviewed (funcall row "binary.dat"))))
       (should (= 1 (alist-get 'reviewed (funcall row "empty.txt"))))
       (should (= 11 (alist-get 'reviewed (funcall row "moved.txt"))))
-      (should (= 11 (alist-get 'stale (funcall row "stale.txt"))))
+      (should (= 11 (alist-get 'reviewed (funcall row "stale.txt"))))
+      (should (= 1 (alist-get 'stale (funcall row "stale.txt"))))
       (should (= 6 (length (alist-get 'tickets status)))))
     ;; Every one of them can still be forgotten, the file gone or not.
     (dolist (path '("text.txt" "binary.dat" "empty.txt" "moved.txt" "stale.txt" "gone.txt"))
@@ -2204,8 +2242,10 @@ PATHS are relative to `default-directory'."
     (let ((tier0 (legu--tier0 root "a.txt" (expand-file-name "a.txt" root))))
       (should-not (plist-get tier0 :reviewed))
       (should (plist-get tier0 :unresolved))
-      (should (equal "stale" (alist-get 'state (car (alist-get 'regions
-                                                               (legu-test--regions "a.txt")))))))))
+      ;; ADR-0018: the changed line is stale, the rest of the region reviewed.
+      (should (equal '("reviewed" "stale" "reviewed")
+                     (mapcar (lambda (r) (alist-get 'state r))
+                             (alist-get 'regions (legu-test--regions "a.txt"))))))))
 
 (defun legu-test--numstat (path)
   "Lines added and deleted in PATH's sidecar since HEAD, as (ADDED . DELETED)."
@@ -2505,14 +2545,16 @@ is visible, not so it is wanted."
             (legu--repaint)
             (let ((stale (car (plist-get legu--painted :stale))))
               (should stale)
-              ;; the region moved down by the three inserted lines
-              (should (= 23 (car stale)))
+              ;; the region read at 20-30 sits at 23-33 now, and of it only
+              ;; the line the edit wrote is stale (ADR-0018)
+              (should (= 27 (car stale)))
               (goto-char (legu--line-position (car stale)))
               (legu-diff-stale)
               (with-current-buffer (get-buffer (format "*legu-diff: %s*" "a.txt"))
-                ;; the record says 20-30; the region now sits at 23-33
-                (should (= 23 (plist-get legu-diff--source :start)))
-                (should (= 33 (plist-get legu-diff--source :end)))
+                ;; the record says 20-30; re-marking takes the stale line the
+                ;; paint names, which is line 27 alone
+                (should (= 27 (plist-get legu-diff--source :start)))
+                (should (= 27 (plist-get legu-diff--source :end)))
                 (should (= 20 (alist-get 'start
                                          (legu-region-record-at root "a.txt" 20)))))))
         (kill-buffer buffer)))))

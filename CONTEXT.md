@@ -72,6 +72,14 @@ Locating a review record's content in the working tree and deciding whether it
 changed.
 _Avoid_: projection, resolution, relocation, tracking
 
+**Fragment**:
+One of the pieces anchoring reports a review record in when a change landed
+inside its region: the lines a hunk wrote, which are stale, or a run of lines
+between hunks, which is still reviewed where it now sits. Fragmenting is
+derived at anchoring time; the record itself stays one signed line for its
+whole region (ADR-0018).
+_Avoid_: part, slice, sub-region, split record
+
 **Moved**:
 A reviewed region whose content is intact but no longer at the recorded
 location — shifted by edits above it, cut and pasted within the file, or
