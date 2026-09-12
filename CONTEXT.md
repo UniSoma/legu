@@ -55,8 +55,8 @@ _Avoid_: read, audited, checked, seen, covered
 **Stale**:
 The state of a line a human has read whose content has changed since. Only
 the lines a change touched are stale; the rest of the region stays reviewed,
-on the evidence of the same review record. A pure deletion leaves one stale
-line where the deleted lines were.
+on the evidence of the same review record. A change that leaves the region
+no line of its own to point at leaves a seam instead.
 _Avoid_: dirty, outdated, invalidated
 
 **Missing**:
@@ -75,10 +75,19 @@ _Avoid_: projection, resolution, relocation, tracking
 **Fragment**:
 One of the pieces anchoring reports a review record in when a change landed
 inside its region: the lines a hunk wrote, which are stale, or a run of lines
-between hunks, which is still reviewed where it now sits. Fragmenting is
-derived at anchoring time; the record itself stays one signed line for its
-whole region (ADR-0018).
+between hunks, which is still reviewed where it now sits. A change reaching
+past the region's edge is clipped to the part of it the record read, so a
+fragment never covers a line nobody read. Fragmenting is derived at anchoring
+time; the record itself stays one signed line for its whole region (ADR-0018).
 _Avoid_: part, slice, sub-region, split record
+
+**Seam**:
+The one stale line standing for a change that left the region no line of its
+own — a deletion, or a change reaching in from outside that shrank below
+where the region began in it. It is the line after the change when that line
+is still inside the region, and the line before it otherwise, so the seam is
+always a line the reader read (ADR-0018).
+_Avoid_: gap, join, scar, marker
 
 **Moved**:
 A reviewed region whose content is intact but no longer at the recorded

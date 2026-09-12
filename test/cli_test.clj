@@ -789,12 +789,13 @@
   (first (filter #(= path (:path %)) (:files (status-json dir)))))
 
 (defn- long-record!
-  "A repository whose long.txt is 150 numbered lines, every one of them
-   reviewed under one record."
-  []
+  "A repository whose long.txt is 150 numbered lines, with a record over each
+   of `targets`, or over the whole file when none is named."
+  [& targets]
   (let [dir (scratch-repo!)]
     (commit! dir {"long.txt" (numbered 1 150)})
-    (legu! dir "mark" "long.txt:1-150" "--reviewer" reviewer)
+    (doseq [target (or (seq targets) ["long.txt:1-150"])]
+      (legu! dir "mark" target "--reviewer" reviewer))
     dir))
 
 (defn- edit-73-97!
@@ -890,9 +891,7 @@
                                             (numbered 50 150))]
                        ["right after" (str (numbered 1 100) (numbered "added" 1 2)
                                            (numbered 101 150))]]]
-    (let [dir (scratch-repo!)]
-      (commit! dir {"long.txt" (numbered 1 150)})
-      (legu! dir "mark" "long.txt:50-100" "--reviewer" reviewer)
+    (let [dir (long-record! "long.txt:50-100")]
       (write-files! dir {"long.txt" file})
       (is (= (if (= "right before" what)
                [[52 102 "reviewed" nil true]]
@@ -914,10 +913,133 @@
            (map #(take 3 %) (anchors dir "long.txt"))))
     (is (= 2 (count (rest (sidecar-lines dir "long.txt")))))))
 
+(deftest a-deletion-inside-a-region-leaves-one-stale-line-at-the-seam
+  (let [dir (long-record!)]
+    (write-files! dir {"long.txt" (str (numbered 1 72) (numbered 98 150))})
+    ;; the line the deletion left behind is the one that reads differently now
+    (is (= [[1 72 "reviewed" nil false]
+            [73 73 "stale" "content changed" false]
+            [74 125 "reviewed" nil true]]
+           (anchors dir "long.txt")))
+    (is (= [{:path "long.txt" :start 73 :end 73
+             :reason "content changed" :state "stale"}]
+           (:stale (stale-json dir))))
+    (is (= {:path "long.txt" :total 125 :reviewed 124 :stale 1 :unreviewed 0
+            :ranges "1-72,74-125"}
+           (file-row dir "long.txt")))))
+
+(deftest a-deletion-at-the-end-of-a-region-seams-on-its-last-remaining-line
+  (let [dir (long-record! "long.txt:50-100")]
+    ;; no line after the deletion is left inside the region, so the seam falls
+    ;; on the line before it, and the record claims nothing below itself
+    (write-files! dir {"long.txt" (str (numbered 1 89) (numbered 101 150))})
+    (is (= [[50 88 "reviewed" nil false]
+            [89 89 "stale" "content changed" false]]
+           (anchors dir "long.txt")))
+    (is (= {:path "long.txt" :total 139 :reviewed 39 :stale 1 :unreviewed 99
+            :ranges "50-88"}
+           (file-row dir "long.txt")))))
+
+(deftest deleting-every-line-of-a-region-leaves-it-stale-where-it-was
+  (let [dir (long-record! "long.txt:50-100")]
+    ;; nothing is left of the region to seam on, so it is stale at the range
+    ;; it was read at, clamped to the file
+    (write-files! dir {"long.txt" (str (numbered 1 49) (numbered 101 150))})
+    (is (= [[50 99 "stale" "content changed" false]] (anchors dir "long.txt")))
+    (is (= [{:path "long.txt" :start 50 :end 99
+             :reason "content changed" :state "stale"}]
+           (:stale (stale-json dir))))))
+
+(deftest part-of-a-region-cut-and-pasted-elsewhere-seams-and-lands-unreviewed
+  (let [dir (long-record! "long.txt:40-100")]
+    ;; only the whole region is evidence, so the block carries no review with
+    ;; it: a seam where it was cut, and unreviewed lines where it landed
+    (write-files! dir {"long.txt" (str (numbered 1 72) (numbered 98 129)
+                                       (numbered 73 97) (numbered 130 150))})
+    (is (= [[40 72 "reviewed" nil false]
+            [73 73 "stale" "content changed" false]
+            [74 75 "reviewed" nil true]]
+           (anchors dir "long.txt")))
+    (is (= {:path "long.txt" :total 150 :reviewed 35 :stale 1 :unreviewed 114
+            :ranges "40-72,74-75"}
+           (file-row dir "long.txt")))))
+
+(deftest an-edit-crossing-the-region-start-is-stale-from-the-clipped-start
+  (let [dir (long-record! "long.txt:73-150")]
+    ;; the edit runs from line 60 to line 80, but the record read it only from
+    ;; 73 on, so it answers for the last eight of those lines and nothing
+    ;; above: 1-72 was never read and stays unreviewed
+    (write-files! dir {"long.txt" (str (numbered 1 59) (numbered "edit" 60 80)
+                                       (numbered 81 150))})
+    (is (= [[73 80 "stale" "content changed" false]
+            [81 150 "reviewed" nil false]]
+           (anchors dir "long.txt")))
+    (is (= [{:path "long.txt" :start 73 :end 80
+             :reason "content changed" :state "stale"}]
+           (:stale (stale-json dir))))
+    (is (= {:path "long.txt" :total 150 :reviewed 70 :stale 8 :unreviewed 72
+            :ranges "81-150"}
+           (file-row dir "long.txt")))))
+
+(deftest an-edit-crossing-the-region-end-is-stale-to-its-projected-end
+  (let [dir (long-record! "long.txt:50-100")]
+    ;; three lines above the region move it down, so the end it answers to is
+    ;; 103, not the 100 it was read at; the edit writes as far as 118 and the
+    ;; record claims none of that tail
+    (write-files! dir {"long.txt" (str (numbered "top" 1 3) (numbered 1 89)
+                                       (numbered "edit" 1 26)
+                                       (numbered 111 150))})
+    (is (= [[53 92 "reviewed" nil true]
+            [93 103 "stale" "content changed" false]]
+           (anchors dir "long.txt")))
+    (is (= [{:path "long.txt" :start 93 :end 103
+             :reason "content changed" :state "stale"}]
+           (:stale (stale-json dir))))
+    (is (= {:path "long.txt" :total 158 :reviewed 40 :stale 11 :unreviewed 107
+            :ranges "53-92"}
+           (file-row dir "long.txt")))))
+
+(deftest a-crossing-edit-that-shrank-below-the-offset-leaves-one-seam-line
+  (let [dir (long-record! "long.txt:73-150")]
+    ;; the record entered the edit thirteen lines in and the edit wrote only
+    ;; five, so nothing it wrote is the record's to claim: the line after it
+    ;; is the seam, as it is for a deletion
+    (write-files! dir {"long.txt" (str (numbered 1 59) (numbered "edit" 1 5)
+                                       (numbered 81 150))})
+    (is (= [[65 65 "stale" "content changed" false]
+            [66 134 "reviewed" nil true]]
+           (anchors dir "long.txt")))
+    (is (= [{:path "long.txt" :start 65 :end 65
+             :reason "content changed" :state "stale"}]
+           (:stale (stale-json dir))))
+    (is (= {:path "long.txt" :total 134 :reviewed 69 :stale 1 :unreviewed 64
+            :ranges "66-134"}
+           (file-row dir "long.txt")))))
+
+(deftest two-records-crossed-by-one-edit-each-claim-their-own-part-of-it
+  (let [dir (long-record! "long.txt:1-50" "long.txt:51-100")]
+    ;; one edit over 40-60 crosses the seam between the two records: the first
+    ;; read eleven of its old lines and the second the other ten, so the first
+    ;; claims the edit's first eleven new lines and the second the rest —
+    ;; 40-65 covered once over, no line claimed twice and none dropped
+    (write-files! dir {"long.txt" (str (numbered 1 39) (numbered "edit" 1 26)
+                                       (numbered 61 150))})
+    (is (= [[1 39 "reviewed" nil false]
+            [40 50 "stale" "content changed" false]
+            [51 65 "stale" "content changed" false]
+            [66 105 "reviewed" nil true]]
+           (anchors dir "long.txt")))
+    (is (= [{:path "long.txt" :start 40 :end 50
+             :reason "content changed" :state "stale"}
+            {:path "long.txt" :start 51 :end 65
+             :reason "content changed" :state "stale"}]
+           (:stale (stale-json dir))))
+    (is (= {:path "long.txt" :total 155 :reviewed 79 :stale 26 :unreviewed 50
+            :ranges "1-39,66-105"}
+           (file-row dir "long.txt")))))
+
 (deftest a-region-cut-and-pasted-elsewhere-in-its-file-is-moved-not-stale
-  (let [dir (scratch-repo!)]
-    (commit! dir {"long.txt" (numbered 1 150)})
-    (legu! dir "mark" "long.txt:50-60" "--reviewer" reviewer)
+  (let [dir (long-record! "long.txt:50-60")]
     (write-files! dir {"long.txt" (str (numbered 1 49) (numbered 61 150)
                                        (numbered 50 60))})
     (is (= [[140 150 "reviewed" "block moved" true]] (anchors dir "long.txt")))

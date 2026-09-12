@@ -734,9 +734,9 @@
 (defn- insertion?
   "Did this hunk write lines without consuming any? Git names such a hunk by
    the old line it follows, so an insertion sits between `old-start` and the
-   line after it, not on `old-start` itself. That is why the three predicates
-   below ask `< end` of an insertion where they ask `<= end` of a hunk with
-   old lines: an insertion after the region's last line is outside it."
+   line after it, not on `old-start` itself. That is why the predicates below
+   ask `< end` of an insertion where they ask `<= end` of a hunk with old
+   lines: an insertion after the region's last line is outside it."
   [{:keys [old-count]}]
   (zero? old-count))
 
@@ -751,49 +751,133 @@
     (< old-start start)
     (< (old-last hunk) start)))
 
-(defn- inside-region?
-  [{:keys [old-start] :as hunk} start end]
-  (and (>= old-start start)
-       (if (insertion? hunk) (< old-start end) (<= (old-last hunk) end))))
-
 (defn- touches-region?
   [{:keys [old-start] :as hunk} start end]
   (if (insertion? hunk)
     (and (>= old-start start) (< old-start end))
     (and (<= old-start end) (>= (old-last hunk) start))))
 
+(defn- deletion?
+  "Did this hunk consume lines without writing any?"
+  [{:keys [new-count]}]
+  (zero? new-count))
+
+(defn- new-first
+  "The first line this hunk wrote. Git names a hunk that wrote nothing by the
+   new line before the gap it left, so the line it would have written first is
+   the one after that."
+  [{:keys [new-start] :as hunk}]
+  (if (deletion? hunk) (inc new-start) new-start))
+
+(defn- new-last
+  "The last line this hunk wrote. A hunk that wrote nothing gets an empty span
+   here, one before `new-first`, as `old-last` gives an insertion."
+  [{:keys [new-count] :as hunk}]
+  (+ (new-first hunk) new-count -1))
+
+(defn- overlap-of
+  "The hunk's own old lines that lie inside the region [start end]. A hunk
+   crossing the region's boundary lies inside it only in part, and that part
+   is all the record answers for."
+  [{:keys [old-start] :as hunk} start end]
+  [(max start old-start) (min end (old-last hunk))])
+
+(defn- clipped-of
+  "ADR-0018: the new lines a hunk's stale fragment covers, clipped by prefix.
+   It starts as far into the hunk's new lines as the region started into its
+   old ones, and ends at the hunk's last new line, or at the region's
+   projected end where the region ended first. Start past end where the hunk
+   shrank below that offset and left the region nothing of its own: the seam
+   case, which a deletion is always in."
+  [{:keys [old-start] :as hunk} start end]
+  (let [[from to] (overlap-of hunk start end)
+        first-new (new-first hunk)]
+    [(+ first-new (- from old-start))
+     (if (= to (old-last hunk))
+       (new-last hunk)
+       (min (new-last hunk) (+ first-new (- to old-start))))]))
+
+(defn- seam?
+  "Did this hunk leave the region a seam line rather than lines of its own?"
+  [hunk start end]
+  (let [[from to] (clipped-of hunk start end)]
+    (> from to)))
+
+(defn- seam-after?
+  "Does the seam fall after this hunk rather than before it? It does when the
+   line after the hunk is still inside the region."
+  [hunk end]
+  (<= (inc (old-last hunk)) end))
+
+(defn- seam-of
+  "ADR-0018: the one line a hunk that left the region nothing of its own
+   leaves stale — the line after what it wrote when that line is still inside
+   the region, else the line before it, so the seam is always a line the
+   reader read."
+  [hunk end]
+  (if (seam-after? hunk end) (inc (new-last hunk)) (dec (new-first hunk))))
+
+(defn- stale-of
+  "The new lines a hunk leaves stale under the region [start end]: the lines
+   it wrote there, clipped, or the single seam line where it wrote none."
+  [hunk start end]
+  (let [[lo hi] (clipped-of hunk start end)]
+    (if (<= lo hi) [lo hi] (repeat 2 (seam-of hunk end)))))
+
+(defn- no-seam?
+  "A hunk that swallowed the region whole: it left the region no line of its
+   own, and `seam-of` has neither side to fall on, so nothing is left to
+   stand for it."
+  [{:keys [old-start] :as hunk} start end]
+  (and (seam? hunk start end)
+       (not (seam-after? hunk end))
+       (< (dec old-start) start)))
+
+(defn- claimed-of
+  "The old lines a hunk's stale fragment answers for: the lines of the region
+   it consumed, plus, where `seam-of` reached beside them, that line too. An
+   insertion consumed none and sits between `old-start` and the line after
+   it, an empty span."
+  [{:keys [old-start] :as hunk} start end]
+  (if (insertion? hunk)
+    [(inc old-start) old-start]
+    (let [[from to] (overlap-of hunk start end)]
+      (cond
+        (not (seam? hunk start end)) [from to]
+        (seam-after? hunk end) [from (inc to)]
+        :else [(dec from) to]))))
+
 (defn- fragments-of
   "ADR-0018: the fragments the region [start end] now falls into, given the
    `hunks` between the file as it was reviewed and the file now. Each hunk
-   inside the region is stale at the lines it wrote; the run of lines between
-   two hunks is still reviewed, at the location the hunks before it left it,
-   and moved when that location is not where it was read.
-   nil where the region holds a hunk this rule cannot split: a pure deletion,
-   whose seam is a rule of its own, or a hunk crossing the region's boundary,
-   which has no line-to-line mapping inside it. The caller then reports the
+   touching the region is stale at the lines it wrote there, or, where it
+   wrote none, at the seam it left; the run of lines between two hunks is
+   still reviewed, at the location the hunks before it left it, and moved when
+   that location is not where it was read.
+   nil where the region holds the one hunk this rule cannot split: one that
+   swallowed the region whole and left no seam. The caller then reports the
    whole region stale."
   [hunks start end]
-  (let [inside (sort-by :old-start (filter #(touches-region? % start end) hunks))]
-    (when (and (seq inside)
-               (every? #(and (pos? (:new-count %)) (inside-region? % start end)) inside))
-      (loop [hs inside
+  (let [touching (sort-by :old-start (filter #(touches-region? % start end) hunks))]
+    (when (and (seq touching)
+               (not-any? #(no-seam? % start end) touching))
+      (loop [hs touching
              read-from start
              offset (reduce + 0 (for [h hunks :when (before-region? h start)]
                                   (- (:new-count h) (:old-count h))))
              acc []]
-        (if-let [{:keys [old-start old-count new-start new-count] :as hunk}
-                 (first hs)]
-          (let [read-to (if (insertion? hunk) old-start (dec old-start))
+        (if-let [{:keys [old-count new-count] :as hunk} (first hs)]
+          (let [[from to] (claimed-of hunk start end)
+                [lo hi] (stale-of hunk start end)
                 acc (cond-> acc
-                      (<= read-from read-to)
+                      (< read-from from)
                       (conj {:state :reviewed :start (+ read-from offset)
-                             :end (+ read-to offset)
+                             :end (+ (dec from) offset)
                              :moved? (not (zero? offset))}))]
             (recur (rest hs)
-                   (if (insertion? hunk) (inc old-start) (inc (old-last hunk)))
+                   (inc to)
                    (+ offset (- new-count old-count))
-                   (conj acc {:state :stale :start new-start
-                              :end (+ new-start new-count -1)
+                   (conj acc {:state :stale :start lo :end hi
                               :reason "content changed"})))
           (cond-> acc
             (<= read-from end)
