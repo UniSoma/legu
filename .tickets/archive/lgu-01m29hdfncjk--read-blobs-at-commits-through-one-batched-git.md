@@ -30,3 +30,7 @@ Prefactor for the per-hunk staleness feature (spec: lgu-01m29h4g9n4s), with no b
 **2026-09-12T02:22:31.058153608Z**
 
 read-at-commit now reads from a run-scoped cache filled by one git cat-file --batch over every [commit path] pair the records cite, prefetched beside the existing hunk fetch. A pair nobody prefetched still pays for a batch of its own, so no caller's answer depends on having been prefetched. Pinned by a GIT_TRACE case asserting one cat-file and zero git show, a framing case over an empty, a missing and a header-shaped blob, and a case that reads one path at two commits with an edit inside each record.
+
+## Notes
+
+Blobs at commits now come from one batched git cat-file, cached per commit and path, prefetched beside the hunks. Landed in 1e1d454 with the tracer bullet that needed it.

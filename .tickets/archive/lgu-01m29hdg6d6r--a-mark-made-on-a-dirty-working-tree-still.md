@@ -34,3 +34,7 @@ Per-hunk staleness, confirmation forward search (spec: lgu-01m29h4g9n4s, ADR-001
 **2026-09-12T04:46:44.589265922Z**
 
 A mark taken on a dirty working tree cites a commit whose text it never read. When the cited commit does not confirm the record's hash, the commits after it that touched the path are tried oldest first and the first that confirms is diffed against instead, so the record fragments as if marked at that commit (ADR-0018). The walk is capped at five commits, the candidates are gathered for every record before any git call the way prefetch! gathers the rest, and a record no commit confirms still reports whole-region stale.
+
+## Notes
+
+When the cited commit does not confirm a record, the commits after it that touched the path are tried oldest first, five at most. Landed in baf21fe.

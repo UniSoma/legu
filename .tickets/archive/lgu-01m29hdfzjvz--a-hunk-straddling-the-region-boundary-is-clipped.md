@@ -34,3 +34,7 @@ Per-hunk staleness, boundary rule (spec: lgu-01m29h4g9n4s, ADR-0018). A hunk tha
 **2026-09-12T03:12:36.121873040Z**
 
 A hunk crossing the region's boundary is clipped by prefix: its stale fragment starts as far into the hunk's new lines as the region started into its old ones and ends at the region's projected end or the hunk's last line, whichever comes first, so lines nobody read stay unreviewed rather than becoming stale. A hunk that shrank below that offset leaves one seam line through the same seam rule lgu-01m29hdfw791 defined, generalised in place rather than duplicated. Two adjacent records crossed by one hunk tile it between them with no line claimed twice and none dropped.
+
+## Notes
+
+A hunk crossing the region boundary is clipped by prefix, so a record never claims a line it did not cover, and one that shrank below the offset takes the seam. Landed in 319724f.

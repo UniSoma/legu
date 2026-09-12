@@ -38,3 +38,7 @@ Per-hunk staleness, whitespace rules (spec: lgu-01m29h4g9n4s, ADR-0018 and ADR-0
 **2026-09-12T04:46:44.475516458Z**
 
 Once a record is confirmed at a commit, whitespace is judged between the text that was read and the text on disk (ADR-0019): trailing whitespace never matters, and leading whitespace matters relative to the region. A block reindented together stays reviewed, alone and beside a real edit; a line moved to another level goes stale with no other character touched. The stored hash keeps ADR-0003's trim, so the store is untouched and a record no commit confirms keeps the trim alone. The mechanism differs from the ADR's description, which cannot separate a wrapped block from a lone dedent; lgu-01m29ywrrzjj carries that amendment. Criterion 5 was narrowed to regions holding more than one indentation level: a flat tab-to-space conversion is a uniform shift, which the ADR's own rule calls the same read, and lgu-01m29yx66fx9 carries that decision.
+
+## Notes
+
+Whitespace is judged between the text that was read and the text on disk, relative to the region. Landed in baf21fe. Two follow-ups: lgu-01m29ywrrzjj amends ADR-0019 to the steps that run, lgu-01m29yx66fx9 decides the flat tab-to-space case.

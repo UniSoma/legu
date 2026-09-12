@@ -37,3 +37,7 @@ Docs for per-hunk staleness (spec: lgu-01m29h4g9n4s). The staleness section of t
 **2026-09-12T04:46:44.692456762Z**
 
 The README's staleness section now describes fragments, the seam, boundary clipping and indentation judged relative to the region, and says what regions --json returns per fragment and that a ticket reference is never fragmented. The guidance to mark what you can hold in your head keeps its place with its new reason: region size no longer affects staleness, but it still bounds what one record vouches for. The known limit about a partly re-marked record's whole range is gone, having been reproduced as fixed first.
+
+## Notes
+
+The README describes fragments, the seam, boundary clipping and relative indentation, and its known limit about a partly re-marked record is gone. Landed in baf21fe.

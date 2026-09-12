@@ -34,3 +34,7 @@ Per-hunk staleness, deletion rule (spec: lgu-01m29h4g9n4s, ADR-0018). A pure del
 **2026-09-12T03:12:36.008061073Z**
 
 A hunk that leaves the region no line of its own is stale at one seam line (ADR-0018): the line after it when that line is still inside the region, else the line before it. The lines above stay reviewed where they are and the lines below stay reviewed, moved by what the deletion removed. A region whose every line was deleted has no seam and keeps the clamped range resolve-region already reported. The moved-block search was not extended to parts of a region, so a block cut out and pasted elsewhere leaves a seam where it was and counts unreviewed where it landed.
+
+## Notes
+
+A hunk that leaves the region no line of its own is stale at one seam line. Landed in 319724f with the boundary clipping that reuses the same rule.

@@ -50,3 +50,7 @@ Fallbacks: a record its recorded commit does not confirm, and a store with no gi
 **2026-09-12T02:22:38.121351742Z**
 
 Anchoring splits a confirmed review record into fragments (ADR-0018): each hunk inside the region is stale at the lines it wrote, the runs between them stay reviewed at the location the hunks left them, and stale is reported per line, so a mark over part of a fragment leaves the rest. regions --json returns one item per fragment carrying the record's provenance and its own moved; stale --json keeps its keys. Nothing in the store changed, and mark and forget still read whole records, so a mark covering a record's stale fragments does not retire it. A record no commit confirms, and a store with no git, fall back to whole-region stale. Deletion seams, boundary clipping and region-relative whitespace still fall back and are the tickets that follow. The six ERT integration cases that pinned ADR-0004 are amended to ADR-0018, the elisp unchanged.
+
+## Notes
+
+Anchoring splits a confirmed record into fragments: the lines each hunk wrote are stale, the runs between them stay reviewed where the hunks left them. stale is reported per line, so a mark over part of a fragment leaves the rest. Landed in 1e1d454.

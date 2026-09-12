@@ -1,12 +1,13 @@
 ---
 id: lgu-01m29h4g9n4s
 title: 'Per-hunk staleness: only the lines a change touched go stale'
-status: open
+status: closed
 type: feature
 priority: 1
 mode: afk
 created: '2026-09-12T00:44:02.229444143Z'
-updated: '2026-09-12T00:46:01.132872069Z'
+updated: '2026-09-12T04:47:28.556451620Z'
+closed: '2026-09-12T04:47:28.556451620Z'
 tags:
 - ready-for-agent
 ---
@@ -125,3 +126,9 @@ Decisions are recorded in ADR-0018 (supersedes ADR-0004) and ADR-0019
 - Design walkthrough with diagrams for every scenario: https://claude.ai/code/artifact/b66b54a3-ad71-4f50-9be4-640cd80654a6
 - ADR-0018 holds the five edge rules and the rejected options; ADR-0019 the indentation rule. CONTEXT.md already defines Stale per line.
 - The dirty-working-tree case is the one most likely to be hit in practice by anyone marking from the editor mid-edit; without the forward search the feature would be silently absent for them.
+
+## Notes
+
+**2026-09-12T04:47:28.556451620Z**
+
+Staleness is per hunk (ADR-0018) and indentation is significant relative to the region (ADR-0019). Anchoring splits a confirmed review record into fragments: the lines each hunk wrote are stale, the runs between them stay reviewed where the hunks left them, and a change that leaves the region no line of its own is stale at one seam. A hunk crossing the region's boundary is clipped by prefix, so a record never claims a line it did not cover. Whitespace is judged between the text that was read and the text on disk, so a block reindented together stays reviewed while a line moved to another level goes stale. A mark taken on a dirty working tree is confirmed against the first later commit that holds what was read. Nothing in the store changed: schema 4, the record keys and the signatures are untouched, and mark and forget still read whole records. Landed in 1e1d454, 319724f and baf21fe. Four follow-ups are filed: lgu-01m29qss37ee, lgu-01m29sm9600c, lgu-01m29ywrrzjj, lgu-01m29yx66fx9.
