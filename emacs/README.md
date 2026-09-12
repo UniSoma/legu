@@ -73,16 +73,16 @@ is on.
 
 ## What you see
 
-The gutter glyph carries the state; the background is reserved for the alarm.
+The gutter glyph carries the state, and nothing is drawn over the text itself.
 
-| | GUI fringe | terminal / margin | background |
-|---|---|---|---|
-| unreviewed | nothing | nothing | none |
-| reviewed | solid bar | `│` | none |
-| stale | dashed bar | `!` | tinted |
-| ticket anchored | dot, first line only | `*` | — |
-| unverified | thin dashes | `:` | none |
-| reading frontier | triangle | `>` | — |
+| | GUI fringe | terminal / margin |
+|---|---|---|
+| unreviewed | nothing | nothing |
+| reviewed | solid bar | `│` |
+| stale | dashed bar | `!` |
+| ticket anchored | dot, first line only | `*` |
+| unverified | thin dashes | `:` |
+| reading frontier | triangle | `>` |
 
 A fully unreviewed file looks exactly like a file without the mode, which is the
 right visual cost for the buffers you open to grep something.
@@ -192,7 +192,7 @@ refuses. There is no setting that acts on a modified buffer silently.
 | `legu-executable` | `"legu"` | |
 | `legu-prefix-key` | `"C-c r"` | |
 | `legu-save-before-mark` | `t` | `t`, `ask` or `nil` |
-| `legu-indicator-style` | `fringe` | or `margin`, `face-only` |
+| `legu-indicator-style` | `fringe` | or `margin` |
 | `legu-frontier-max` | `400` | confirm above this many lines |
 | `legu-watch-store` | `t` | notice other people's marks landing |
 | `legu-dired-column` | `t` | the coverage column in dired |

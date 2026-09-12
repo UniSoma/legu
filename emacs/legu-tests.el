@@ -287,8 +287,13 @@ parse is not skipped, since the lines a merge conflict wraps are records."
       (dolist (echo echoes)
         (should-not (string-match-p "\\bread\\b" (cdr echo)))))))
 
-(ert-deftest legu-test-unverified-drops-the-alarm-background ()
+(ert-deftest legu-test-no-painted-overlay-carries-a-face ()
+  ;; One channel: the gutter glyph.  legu paints no background, in any state.
   (legu-test--with-buffer 20
+    (legu-overlay-paint :reviewed '((3 . 5)) :stale '((10 . 11))
+                        :tickets '(7) :frontier 9)
+    (dolist (o (legu-test--legu-overlays))
+      (should-not (overlay-get o 'face)))
     (legu-overlay-paint :stale '((3 . 4)) :unverified t)
     (dolist (o (legu-test--legu-overlays))
       (should (eq 'unverified (overlay-get o 'legu-state)))
@@ -331,8 +336,9 @@ parse is not skipped, since the lines a merge conflict wraps are records."
     (let ((before (length (legu-test--legu-overlays))))
       (legu-overlay-dim)
       (should (= before (length (legu-test--legu-overlays))))
-      (dolist (o (legu-test--legu-overlays))
-        (should-not (overlay-get o 'face))))))
+      (let ((dimmed (legu--indicator 'unverified legu--style)))
+        (dolist (o (legu-test--legu-overlays))
+          (should (equal dimmed (overlay-get o 'before-string))))))))
 
 (ert-deftest legu-test-out-of-scope-paints-one-marker ()
   (legu-test--with-buffer 30

@@ -5,11 +5,11 @@
 
 ;;; Commentary:
 
-;; Two channels, and only two: the gutter glyph carries the review state,
-;; the background is reserved for the alarm.  Reviewed code is the eventual
-;; normal state of a well read file, so tinting it would mean tinting almost
-;; everything and fighting font-lock for hours.  Absence is the signal for
-;; unreviewed: a file nobody has read looks exactly like a file without the mode.
+;; One channel, and only one: the gutter glyph carries the review state, and
+;; legu paints no background at all.  A tint spans the text you are editing,
+;; and it fights font-lock for every line it covers; a glyph sits beside the
+;; text and costs it nothing.  Absence is the signal for unreviewed: a file
+;; nobody has read looks exactly like a file without the mode.
 ;;
 ;; Overlays, never text properties: text properties travel with
 ;; `kill-region' and `yank', so cutting a reviewed block and pasting it
@@ -29,9 +29,9 @@
 (defcustom legu-indicator-style 'fringe
   "How review state is drawn beside each line.
 `fringe' needs a graphical frame; windows on a terminal fall back to
-`margin' by themselves.  `face-only' draws no glyph, for users whose
-fringe already belongs to `diff-hl'."
-  :type '(choice (const fringe) (const margin) (const face-only))
+`margin' by themselves.  Choose `margin' outright where the fringe
+already belongs to something else, such as `diff-hl'."
+  :type '(choice (const fringe) (const margin))
   :group 'legu)
 
 (defcustom legu-indicator-side 'left
@@ -69,12 +69,6 @@ fringe already belongs to `diff-hl'."
 
 (defface legu-stale '((t :inherit warning))
   "Face for the gutter bar beside a line whose content changed since it was read."
-  :group 'legu)
-
-(defface legu-stale-region
-  '((((background light)) :background "#fdf3e3" :extend t)
-    (((background dark))  :background "#332b1c" :extend t))
-  "Face tinting a region that needs re-reading.  The only background legu paints."
   :group 'legu)
 
 (defface legu-ticket '((t :inherit font-lock-constant-face))
@@ -177,7 +171,6 @@ A `(left-fringe …)' display spec renders nothing at all on a terminal,
 so any window on a text frame forces the whole buffer to the margin."
   (let ((windows (get-buffer-window-list nil nil t)))
     (cond
-     ((eq legu-indicator-style 'face-only) 'face-only)
      ((eq legu-indicator-style 'margin) 'margin)
      ((null windows) (if (display-graphic-p) 'fringe 'margin))
      ((seq-some (lambda (w) (not (display-graphic-p (window-frame w)))) windows) 'margin)
@@ -199,10 +192,9 @@ so any window on a text frame forces the whole buffer to the margin."
         "|")))
 
 (defun legu--indicator (state style)
-  "A `before-string' drawing STATE in STYLE, or nil."
+  "A `before-string' drawing STATE in STYLE."
   (let ((face (alist-get state legu--state-faces)))
     (pcase style
-      ('face-only nil)
       ('fringe
        (propertize " " 'display
                    (list (if (eq legu-indicator-side 'right) 'right-fringe 'left-fringe)
@@ -242,9 +234,7 @@ across every edit in C for free."
   (let ((style (or legu--style (legu-overlay-effective-style))))
     (dolist (ov legu--overlays)
       (when (overlay-buffer ov)
-        (overlay-put ov 'face nil)
-        (when (overlay-get ov 'before-string)
-          (overlay-put ov 'before-string (legu--indicator 'unverified style)))))))
+        (overlay-put ov 'before-string (legu--indicator 'unverified style))))))
 
 (defvar-local legu--line-cache nil
   "Cons of (LINE . POSITION) from the last `legu--line-bounds' call.")
@@ -264,8 +254,8 @@ ten thousand line file one line at a time is otherwise quadratic."
       (setq legu--line-cache (cons line (point)))
       (cons (point) (min (point-max) (line-beginning-position 2))))))
 
-(defun legu--make-overlay (line state style &optional background)
-  "Paint LINE in STATE and STYLE, with BACKGROUND when asked."
+(defun legu--make-overlay (line state style)
+  "Paint LINE in STATE and STYLE."
   (let* ((bounds (legu--line-bounds line))
          (beg (car bounds)) (end (cdr bounds)))
     ;; `legu--line-bounds' answers in absolute positions, so the guard has to
@@ -281,9 +271,7 @@ ten thousand line file one line at a time is otherwise quadratic."
         (overlay-put ov 'priority (pcase state
                                     ('reviewed 10) ('stale 20) ('unverified 10)
                                     ('ticket 30) ('frontier 30) (_ 15)))
-        (when background (overlay-put ov 'face background))
-        (when-let* ((indicator (legu--indicator state style)))
-          (overlay-put ov 'before-string indicator))
+        (overlay-put ov 'before-string (legu--indicator state style))
         (overlay-put ov 'help-echo
                      (pcase state
                        ('reviewed "legu: reviewed")
@@ -301,8 +289,8 @@ ten thousand line file one line at a time is otherwise quadratic."
 
 REVIEWED and STALE are line range sets, TICKETS a list of first lines,
 FRONTIER a line number.  With UNVERIFIED, everything is drawn in the
-unverified style and no background is tinted: the file on disk is not
-the file on screen, and legu only ever describes the file on disk."
+unverified style: the file on disk is not the file on screen, and legu
+only ever describes the file on disk."
   (legu-overlay-clear)
   (setq legu--line-cache nil)
   (let ((style (legu-overlay-effective-style)))
@@ -324,8 +312,7 @@ the file on screen, and legu only ever describes the file on disk."
             (while (<= line (cdr range))
               (unless (gethash line claimed)
                 (puthash line t claimed)
-                (legu--make-overlay line (if unverified 'unverified 'stale) style
-                                    (unless unverified 'legu-stale-region)))
+                (legu--make-overlay line (if unverified 'unverified 'stale) style))
               (setq line (1+ line)))))
         (dolist (range reviewed)
           (let ((line (car range)))
