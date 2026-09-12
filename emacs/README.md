@@ -65,7 +65,8 @@ is on.
 | `s` | `legu-diff-stale` | what changed since I read it (`C-u` for ediff) |
 | `.` | `legu-describe-region` | current state, provenance and tickets at point |
 | `t` `T` | `legu-ticket` `legu-visit-ticket` | anchor / open a ticket id |
-| `k` | `legu-forget` | drop this region's state |
+| `k` | `legu-forget` | the records at point, or every record the region touches; `C-u` whole file |
+| `K` | `legu-forget-file` | the whole file |
 | `l` `J` | `legu-list` `legu-next-file` | the queue / straight to the next file |
 | `c` `g` | `legu-coverage` `legu-refresh` | the three numbers / repaint (`C-u` re-runs legu) |
 | `h` `f` | `legu-toggle-highlights` `legu-list-failures` | |

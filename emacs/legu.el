@@ -1405,35 +1405,117 @@ legu stores the anchor; the ticket itself lives in the tracker."
          (legu--record-failure root "ticket" (format "%s %s" target ticket) stderr)
          (message "%s" (propertize (string-trim stderr) 'face 'warning)))))))
 
+(defun legu--forget-targets (answer region)
+  "Ranges anchored across REGION in a parsed `legu regions --json' ANSWER.
+Each review record once, its fragments folded back into the record's own
+range, which is the only target `legu forget' matches: forget never
+splits a record (ADR-0018).  A ticket reference is a range of its own.
+A record the CLI could not anchor has no range and is not here."
+  (let ((records (make-hash-table :test #'equal))
+        ranges)
+    (dolist (r (alist-get 'regions answer))
+      (when-let* ((start (alist-get 'start r))
+                  (end (alist-get 'end r)))
+        (let* ((key (alist-get 'original r))
+               (whole (gethash key records)))
+          (puthash key (if whole
+                           (cons (min start (car whole)) (max end (cdr whole)))
+                         (cons start end))
+                   records))))
+    (maphash (lambda (_key whole) (push whole ranges)) records)
+    (dolist (tk (alist-get 'tickets answer))
+      (when-let* ((start (alist-get 'start tk))
+                  (end (alist-get 'end tk)))
+        (push (cons start end) ranges)))
+    (seq-sort-by #'car #'<
+                 (seq-uniq
+                  (seq-filter (lambda (range)
+                                (and (<= (car range) (cdr region))
+                                     (<= (car region) (cdr range))))
+                              ranges)))))
+
+(defun legu--forget-one (root rel buffer target range)
+  "Queue a forget of TARGET, then repaint BUFFER.
+RANGE is what the snapshot for REL loses once the CLI has dropped it."
+  (legu--enqueue-write
+   root (list "forget" target)
+   (lambda (status stdout stderr)
+     (if (eq status 'ok)
+         (progn
+           (message "%s" (string-trim stdout))
+           (legu--patch-snapshot root rel :unreviewed (list range))
+           (when (buffer-live-p buffer)
+             (with-current-buffer buffer (legu--repaint))))
+       (legu--record-failure root "forget" target stderr)
+       (message "%s" (propertize (string-trim stderr) 'face 'warning))))))
+
+(defun legu--forget-anchored (root rel buffer region)
+  "Forget every record REGION of REL touches, after naming them.
+The records come from the CLI, which is the only thing that knows where
+each one anchors now; the prompt waits for its answer."
+  (let ((target (legu--target-string rel region)))
+    (message "legu: finding the records at %s..." target)
+    (legu--run
+     root (list "regions" rel "--json")
+     (lambda (status stdout stderr)
+       (let ((answer (and (eq status 'ok) (legu--parse-json stdout))))
+         (if (null answer)
+             (message "%s" (propertize
+                            (if (string-empty-p (string-trim stderr))
+                                (format "legu: could not read the records of %s" rel)
+                              (string-trim stderr))
+                            'face 'warning))
+           (let ((ranges (legu--forget-targets answer region)))
+             (cond
+              ((null ranges)
+               (message "legu: no record at %s" target))
+              ((not (yes-or-no-p
+                     (format "Forget the state anchored at %s:%s?  (recoverable from git) "
+                             rel (mapconcat (lambda (r) (format "%d-%d" (car r) (cdr r)))
+                                            ranges ", "))))
+               (message "legu: cancelled"))
+              (t
+               (dolist (range ranges)
+                 (legu--forget-one root rel buffer
+                                   (legu--target-string rel range) range)))))))))))
+
+(defun legu--forget-file (root rel buffer)
+  "Forget every record of REL, after a prompt, then repaint BUFFER."
+  (let ((lines (with-current-buffer buffer (legu--buffer-lines))))
+    (unless (yes-or-no-p
+             (format "Forget every record of %s?  (recoverable from git) " rel))
+      (user-error "legu: cancelled"))
+    ;; The patch has to name the lines, or forgetting a file leaves the
+    ;; queue and the dired column drawing state that is gone.
+    (legu--forget-one root rel buffer rel (cons 1 (max 1 lines)))))
+
 (defun legu-forget (&optional arg)
-  "Drop the review state of the region at point.
-The record is recoverable from git: `.review/' is committed."
+  "Forget the review records at point.
+
+With no active region, the records anchored at the current line; with a
+region, every record it touches.  Each is named before you confirm, and
+each goes whole: forget never splits a record, so a range inside one is
+answered with the record that covers it.  With \\[universal-argument],
+the whole file; with two, prompts for a range.
+
+The records are recoverable from git: `.review/' is committed."
   (interactive "P")
   (legu--assert-usable)
-  (let* ((root legu--root)
-         (rel legu--relpath)
-         (region (legu--target-region arg))
-         (lines (legu--buffer-lines))
-         ;; No region is the whole file, the same as it is for a mark: the
-         ;; patch has to name the lines, or forgetting a file leaves the
-         ;; queue and the dired column drawing state that is gone.
-         (dropped (list (or region (cons 1 (max 1 lines)))))
-         (target (legu--target-string rel region)))
-    (unless (yes-or-no-p
-             (format "Forget review state at %s?  (recoverable from git) " target))
-      (user-error "legu: cancelled"))
-    (let ((buffer (current-buffer)))
-      (legu--enqueue-write
-       root (list "forget" target)
-       (lambda (status stdout stderr)
-         (if (eq status 'ok)
-             (progn
-               (message "%s" (string-trim stdout))
-               (legu--patch-snapshot root rel :unreviewed dropped)
-               (when (buffer-live-p buffer)
-                 (with-current-buffer buffer (legu--repaint))))
-           (legu--record-failure root "forget" target stderr)
-           (message "%s" (propertize (string-trim stderr) 'face 'warning))))))))
+  (legu--ensure-saved)
+  (let ((root legu--root)
+        (rel legu--relpath)
+        (buffer (current-buffer))
+        (region (if (or arg (legu--selection-p))
+                    (legu--target-region arg)
+                  (let ((line (legu--line-number))) (cons line line)))))
+    (if region
+        (legu--forget-anchored root rel buffer region)
+      (legu--forget-file root rel buffer))))
+
+(defun legu-forget-file ()
+  "Forget every review record of this file."
+  (interactive)
+  (legu-forget '(4)))
 
 (defun legu--gaps ()
   "Ranges of this buffer that are unreviewed or stale."
@@ -1792,6 +1874,7 @@ With a prefix argument REFRESH, refresh the snapshot first."
   "t" #'legu-ticket
   "T" #'legu-visit-ticket
   "k" #'legu-forget
+  "K" #'legu-forget-file
   "l" #'legu-list
   "J" #'legu-next-file
   "c" #'legu-coverage

@@ -3083,5 +3083,151 @@ and has rows for everything but docs/x.md."
       (should-not legu-dired-mode))))
 
 
+;;;; Forget snaps to whole records
+;;
+;; Forget acts on whole records (ADR-0018).  A range inside one used to be
+;; sent as-is, and the CLI answered "forgot 0" with exit 0: a confirmation
+;; prompt followed by nothing.  The package now asks the CLI where the
+;; records anchor and names the ones the range touches.
+
+(defconst legu-test--fragmented-regions
+  "{\"path\":\"a.txt\",\"regions\":[{\"start\":5,\"end\":7,\"state\":\"reviewed\",\"original\":{\"path\":\"a.txt\",\"start\":5,\"end\":10,\"commit\":\"abc\",\"reviewer\":\"Ada\",\"timestamp\":\"t1\"}},{\"start\":8,\"end\":8,\"state\":\"stale\",\"original\":{\"path\":\"a.txt\",\"start\":5,\"end\":10,\"commit\":\"abc\",\"reviewer\":\"Ada\",\"timestamp\":\"t1\"}},{\"start\":9,\"end\":10,\"state\":\"reviewed\",\"original\":{\"path\":\"a.txt\",\"start\":5,\"end\":10,\"commit\":\"abc\",\"reviewer\":\"Ada\",\"timestamp\":\"t1\"}},{\"start\":11,\"end\":15,\"state\":\"reviewed\",\"original\":{\"path\":\"a.txt\",\"start\":11,\"end\":15,\"commit\":\"abc\",\"reviewer\":\"Bea\",\"timestamp\":\"t2\"}},{\"start\":null,\"end\":null,\"state\":\"missing\",\"original\":{\"path\":\"old.txt\",\"start\":1,\"end\":2,\"commit\":\"abc\",\"reviewer\":\"Cy\",\"timestamp\":\"t3\"}}],\"tickets\":[{\"start\":12,\"end\":12,\"ticket\":\"T-1\"}],\"complete\":true}"
+  "A `legu regions --json' answer: one record in three fragments, one whole,
+one the CLI could not anchor, and a ticket reference.")
+
+(ert-deftest legu-test-forget-targets-fold-fragments-into-their-record ()
+  (let ((answer (legu--parse-json legu-test--fragmented-regions)))
+    ;; A line inside the stale fragment names the whole record.
+    (should (equal '((5 . 10)) (legu--forget-targets answer '(8 . 8))))
+    ;; A range across two records and a ticket names all three, once each.
+    (should (equal '((5 . 10) (11 . 15) (12 . 12))
+                   (legu--forget-targets answer '(10 . 12))))
+    ;; The record the CLI could not anchor has no range to touch.
+    (should-not (legu--forget-targets answer '(1 . 4)))))
+
+(defmacro legu-test--with-forget-stubs (prompt-answer &rest body)
+  "Run BODY with the CLI and the prompt stubbed for a forget.
+PROMPT-ANSWER is what `yes-or-no-p' returns.  Binds `runs' to the CLI
+argument lists in the order they were issued, `prompts' to the prompts
+shown and `messages' to what was echoed, and answers a regions query with
+`legu-test--fragmented-regions'."
+  (declare (indent 1))
+  `(let (runs prompts messages)
+     (cl-letf (((symbol-function 'legu--run)
+                (lambda (_root args callback)
+                  (setq runs (append runs (list args)))
+                  (pcase (car args)
+                    ("regions" (funcall callback 'ok legu-test--fragmented-regions ""))
+                    (_ (funcall callback 'ok "forgot 1 record" "")))))
+               ((symbol-function 'yes-or-no-p)
+                (lambda (prompt) (push prompt prompts) ,prompt-answer))
+               ((symbol-function 'message)
+                (lambda (fmt &rest args)
+                  (when fmt (push (apply #'format fmt args) messages)))))
+       (with-temp-buffer
+         (insert (legu-test--lines 20))
+         (setq buffer-file-name "/r/a.txt"
+               legu--root "/r/"
+               legu--relpath "a.txt")
+         (set-buffer-modified-p nil)
+         (let ((legu--write-queues (make-hash-table :test #'equal))
+               (legu--write-active (make-hash-table :test #'equal))
+               (legu--failures nil))
+           ,@body)))))
+
+(ert-deftest legu-test-forget-at-point-names-the-record-that-covers-the-line ()
+  (legu-test--with-forget-stubs t
+    (goto-char (legu--line-position 8))
+    (legu-forget)
+    (should (equal '(("regions" "a.txt" "--json") ("forget" "a.txt:5-10")) runs))
+    (should (equal '("Forget the state anchored at a.txt:5-10?  (recoverable from git) ")
+                   prompts))))
+
+(ert-deftest legu-test-forget-of-a-region-names-every-record-it-touches ()
+  (legu-test--with-forget-stubs t
+    ;; The queue and the diff buffer name a region as a cons; a selection
+    ;; reaches the same path.
+    (legu-forget '(10 . 12))
+    (should (equal '(("regions" "a.txt" "--json")
+                     ("forget" "a.txt:5-10")
+                     ("forget" "a.txt:11-15")
+                     ("forget" "a.txt:12-12"))
+                   runs))
+    (should (string-match-p "a.txt:5-10, 11-15, 12-12\\?" (car prompts)))))
+
+(ert-deftest legu-test-forget-declined-writes-nothing ()
+  (legu-test--with-forget-stubs nil
+    (goto-char (legu--line-position 8))
+    (legu-forget)
+    (should (equal '(("regions" "a.txt" "--json")) runs))
+    (should (member "legu: cancelled" messages))))
+
+(ert-deftest legu-test-forget-where-nothing-is-anchored-does-not-prompt ()
+  (legu-test--with-forget-stubs t
+    (goto-char (legu--line-position 2))
+    (legu-forget)
+    (should (equal '(("regions" "a.txt" "--json")) runs))
+    (should-not prompts)
+    (should (member "legu: no record at a.txt:2-2" messages))))
+
+(ert-deftest legu-test-forget-file-drops-the-whole-file-without-a-query ()
+  (legu-test--with-forget-stubs t
+    (goto-char (legu--line-position 8))
+    (legu-forget-file)
+    (should (equal '(("forget" "a.txt")) runs))
+    (should (equal '("Forget every record of a.txt?  (recoverable from git) ") prompts))))
+
+(ert-deftest legu-test-forget-file-is-bound-beside-mark-file ()
+  (should (eq #'legu-forget (lookup-key legu-command-map (kbd "k"))))
+  (should (eq #'legu-forget-file (lookup-key legu-command-map (kbd "K"))))
+  (should (eq #'legu-mark-file (lookup-key legu-command-map (kbd "R")))))
+
+(ert-deftest legu-test-integration-forget-inside-a-fragmented-record-drops-it ()
+  ;; The real CLI reports the edited record in fragments; the package folds
+  ;; them back and forgets the record by its whole current range.
+  (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 40) "\n")))
+    (legu-test--legu "mark" "a.txt:1-30")
+    (legu-test--legu "mark" "a.txt:31-40")
+    (let ((buffer (find-file-noselect (expand-file-name "a.txt" root))))
+      (unwind-protect
+          (with-current-buffer buffer
+            (legu-mode 1)
+            (goto-char (legu--line-position 20))
+            (delete-region (line-beginning-position) (line-end-position))
+            (insert "changed")
+            (save-buffer)
+            (goto-char (legu--line-position 10))
+            (let (prompts)
+              (cl-letf (((symbol-function 'yes-or-no-p)
+                         (lambda (prompt) (push prompt prompts) t)))
+                (legu-forget)
+                (should (legu-test--wait (lambda () prompts)))
+                (should (string-match-p "a.txt:1-30\\?" (car prompts)))))
+            (should (legu-test--wait
+                     (lambda ()
+                       (equal '((31 . 40))
+                              (mapcar (lambda (r) (cons (alist-get 'start r)
+                                                        (alist-get 'end r)))
+                                      (plist-get (legu-sidecar-records root "a.txt")
+                                                 :regions))))))
+            (should-not legu--failures))
+        (kill-buffer buffer)))))
+
+(ert-deftest legu-test-integration-forget-file-empties-the-sidecar ()
+  (legu-test--with-repo (list (cons "a.txt" (concat (legu-test--lines 12) "\n")))
+    (legu-test--legu "mark" "a.txt:1-5")
+    (legu-test--legu "mark" "a.txt:8-12")
+    (let ((buffer (find-file-noselect (expand-file-name "a.txt" root))))
+      (unwind-protect
+          (with-current-buffer buffer
+            (legu-mode 1)
+            (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t)))
+              (legu-forget-file))
+            (should (legu-test--wait
+                     (lambda () (not (legu-test--sidecar-text root "a.txt")))))
+            (should-not legu--failures))
+        (kill-buffer buffer)))))
+
+
 (provide 'legu-tests)
 ;;; legu-tests.el ends here

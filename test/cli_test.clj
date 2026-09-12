@@ -513,6 +513,41 @@
     (is (= 0 (:exit (legu! dir "forget" "alpha.txt"))))
     (is (nil? (sidecar-lines dir "alpha.txt")))))
 
+;; Forget acts on whole records (ADR-0018). A range inside one matches
+;; nothing, and a forget that drops nothing fails rather than answering
+;; "forgot 0" with exit 0, which every caller read as success.
+
+(deftest a-forget-inside-a-record-fails-and-names-the-record
+  (let [dir (scratch-repo!)]
+    (legu! dir "mark" "alpha.txt:1-5" "--reviewer" reviewer)
+    (let [before (sidecar-lines dir "alpha.txt")
+          {:keys [exit out err]} (legu! dir "forget" "alpha.txt:2-3")]
+      (is (= 1 exit))
+      (is (= "" out))
+      (is (= "legu: no record anchored at alpha.txt:2-3; records covering it: alpha.txt:1-5\n"
+             err))
+      (is (= before (sidecar-lines dir "alpha.txt"))))))
+
+(deftest a-forget-across-two-records-names-both
+  (let [dir (scratch-repo!)]
+    (legu! dir "mark" "alpha.txt:1-2" "--reviewer" reviewer)
+    (legu! dir "mark" "alpha.txt:3-5" "--reviewer" reviewer)
+    (legu! dir "ticket" "alpha.txt:4-4" "T-1")
+    (let [{:keys [exit err]} (legu! dir "forget" "alpha.txt:2-4")]
+      (is (= 1 exit))
+      (is (= (str "legu: no record anchored at alpha.txt:2-4; records overlapping it: "
+                  "alpha.txt:1-2, alpha.txt:3-5, alpha.txt:4-4\n")
+             err)))))
+
+(deftest a-forget-that-drops-nothing-fails
+  (let [dir (scratch-repo!)]
+    (doseq [target ["alpha.txt" "alpha.txt:1-2"]]
+      (let [{:keys [exit out err]} (legu! dir "forget" target "--json")]
+        (is (= 1 exit) target)
+        (is (= "" out) target)
+        (is (= (str "legu: nothing to forget at " target "\n") err) target)))
+    (is (nil? (sidecar-lines dir "alpha.txt")))))
+
 (defn- write-sidecar! [dir path text]
   (let [f (sidecar-file dir path)]
     (fs/create-dirs (fs/parent f))

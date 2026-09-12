@@ -178,8 +178,11 @@ Four consequences worth stating plainly:
 Region size does not decide how much of a record goes stale, but it is still
 the range that record vouches for: one reviewer's word, over those lines, at
 one commit. The fragments that stay reviewed carry no hash of their own and are
-trusted on the diff alone, and `mark` and `forget` act on whole records. Mark
-regions roughly the size you can hold in your head at once.
+trusted on the diff alone, and `mark` and `forget` act on whole records. A
+`forget` of a range inside a record drops nothing, and a forget that drops
+nothing fails: it exits 1 and names the records anchored across the range, so
+you can name one that exists. Mark regions roughly the size you can hold in
+your head at once.
 
 A block-move is only trusted when it is unambiguous: exactly one matching block
 in the file now, and no twin of it at review time. Two identical blocks where

@@ -1863,41 +1863,6 @@
                                      ticket
                                      path (if opaque "" (str ":" start "-" end)))))))))
 
-(defn cmd-forget [{:keys [opts]}]
-  (let [target (parse-target (:target opts))
-        path (rel-path (:path target))
-        {:keys [start end]} target
-        region {:path path :start start :end end}
-        ;; the file may be long gone: match where a record sits now, or where
-        ;; it was recorded
-        stored-match? (fn [sidecar r]
-                        (and (= sidecar path)
-                             (or (nil? start)
-                                 (and (= start (:start r)) (= end (:end r))))))
-        dropped (atom 0)]
-    (assert-readable! path)
-    (parse-store!)
-    (when start
-      (let [rs (vec (concat (records) (ticket-records)))]
-        (prefetch! rs)))
-    (doseq [sidecar (stored-paths)
-            :let [state (read-state sidecar)]
-            :when state
-            :let [keep? (fn [r]
-                          (if (or (stored-match? sidecar r)
-                                  (and start (same-region? region (assoc r :path sidecar))))
-                            (do (swap! dropped inc) false)
-                            true))
-                  pruned (-> state
-                             (update :regions #(vec (filter keep? %)))
-                             (update :tickets #(vec (filter keep? %))))]
-            :when (not= state pruned)]
-      (save-state! (assoc pruned :path sidecar)))
-    (emit opts {:forgot @dropped :path path :start start :end end}
-          (fn [_] (println (format "forgot %d record%s at %s%s"
-                                   @dropped (if (= 1 @dropped) "" "s") path
-                                   (if start (str ":" start "-" end) "")))))))
-
 (defn under? [path prefix]
   (or (nil? prefix)
       (= prefix ".")
@@ -1988,6 +1953,77 @@
              source
              (or (:timestamp original) "?")
              (or (:commit original) "?")))))
+
+(defn- anchored-over
+  "The ranges review records and ticket references anchor at within
+   `[start end]` of `path`, as the current locations forget would match. Each
+   range once, whatever anchors there, with the fragments of one record folded
+   back into the record's own range."
+  [path start end]
+  (let [touching? (fn [r] (and (:start r) (<= (:start r) end) (<= start (:end r))))
+        whole (fn [{:keys [current]}]
+                (when (not= :missing (:state current))
+                  (select-keys current [:start :end :opaque])))]
+    (->> (concat (records-answering-path path :regions)
+                 (records-answering-path path :tickets))
+         (keep whole)
+         (filter touching?)
+         distinct
+         (sort-by (juxt :start :end)))))
+
+(defn- refuse-empty-forget!
+  "Die for a forget that dropped nothing. One that named a range says what is
+   anchored across it, so the caller can name a record that exists instead."
+  [path start end]
+  (let [where (str path (fmt-region {:start start :end end}))]
+    (if-not start
+      (die (str "nothing to forget at " where))
+      (let [found (anchored-over path start end)
+            covering? (every? #(and (<= (:start %) start) (<= end (:end %))) found)]
+        (die (if (empty? found)
+               (str "nothing to forget at " where)
+               (format "no record anchored at %s; records %s it: %s"
+                       where (if covering? "covering" "overlapping")
+                       (str/join ", " (map #(str path (fmt-region %)) found)))))))))
+
+(defn cmd-forget [{:keys [opts]}]
+  (let [target (parse-target (:target opts))
+        path (rel-path (:path target))
+        {:keys [start end]} target
+        region {:path path :start start :end end}
+        ;; the file may be long gone: match where a record sits now, or where
+        ;; it was recorded
+        stored-match? (fn [sidecar r]
+                        (and (= sidecar path)
+                             (or (nil? start)
+                                 (and (= start (:start r)) (= end (:end r))))))
+        dropped (atom 0)]
+    (assert-readable! path)
+    (parse-store!)
+    (when start
+      (let [rs (vec (concat (records) (ticket-records)))]
+        (prefetch! rs)))
+    (doseq [sidecar (stored-paths)
+            :let [state (read-state sidecar)]
+            :when state
+            :let [keep? (fn [r]
+                          (if (or (stored-match? sidecar r)
+                                  (and start (same-region? region (assoc r :path sidecar))))
+                            (do (swap! dropped inc) false)
+                            true))
+                  pruned (-> state
+                             (update :regions #(vec (filter keep? %)))
+                             (update :tickets #(vec (filter keep? %))))]
+            :when (not= state pruned)]
+      (save-state! (assoc pruned :path sidecar)))
+    ;; Forget acts on whole records (ADR-0018): a range inside one matches
+    ;; nothing, and saying so with exit 0 was a silent no-op in every caller.
+    (when (zero? @dropped)
+      (refuse-empty-forget! path start end))
+    (emit opts {:forgot @dropped :path path :start start :end end}
+          (fn [_] (println (format "forgot %d record%s at %s%s"
+                                   @dropped (if (= 1 @dropped) "" "s") path
+                                   (if start (str ":" start "-" end) "")))))))
 
 (defn cmd-regions [{:keys [opts]}]
   (let [path (rel-path (:path opts))
@@ -2368,7 +2404,7 @@
    {:cmds ["ticket"] :run cmd-ticket :arguments [:target :id]
     :doc "anchor a ticket reference"}
    {:cmds ["forget"] :run cmd-forget :arguments [:target]
-    :doc "drop a region's review state"}
+    :doc "drop the records anchored at a region; fails when there are none"}
    {:cmds ["status"] :run cmd-status :arguments [:path] :optional #{:path}
     :options [:gaps]
     :doc "per-file review state"}

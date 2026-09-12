@@ -55,7 +55,8 @@
     ("]" "next stale" legu-next-stale)
     ("J" "next file" legu-next-file)]
    ["Store"
-    ("k" "forget region" legu-forget)
+    ("k" "forget record at point" legu-forget)
+    ("K" "forget whole file" legu-forget-file)
     ("t" "anchor ticket" legu-ticket)
     ("T" "visit ticket" legu-visit-ticket)]]
   [["Query"
