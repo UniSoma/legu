@@ -115,7 +115,8 @@ so the numbers describe a version you have since changed; the debounced
 refresh replaces them.
 
 Everything comes from the cached snapshot: opening a dired buffer never runs
-the CLI, and the column redraws when a snapshot lands. Inserted
+the CLI, and the column redraws when a snapshot lands or a mark is
+confirmed. Inserted
 subdirectories and `dired-subtree` sections get the column too, and it
 survives `dired-hide-details-mode`. TRAMP and dirvish buffers are left alone.
 The column is read-only — marking happens in the file or from the queue.
@@ -161,7 +162,9 @@ an older asynchronous answer.
    an ERT test asserts the derived numbers equal the CLI's own, row for row.
    That halves the work a refresh costs.
 4. **An optimistic patch** while a mark is in flight, drawn in the unverified
-   style until legu confirms it.
+   style until legu confirms it. The patch redraws the queue and the dired
+   column as soon as legu answers, so a mark shows where it counts without
+   waiting for the debounced refresh behind it.
 
 A snapshot may only pronounce on a file it is newer than. Without that guard
 the union paints a lie: edit inside a region you had read, save, and a
@@ -294,9 +297,9 @@ the mark it produced.
 emacs -Q --batch -L . -l legu-tests.el -f ert-run-tests-batch-and-exit
 ```
 
-157 tests. The pure half covers range arithmetic, the sidecar reader, the derived
-coverage numbers, the dired column's sums and formatting, painting
-precedence and the overlay lifecycle. The other
+164 tests. The pure half covers range arithmetic, the sidecar reader, the
+derived coverage numbers, the dired column's sums and formatting, painting
+precedence, the queue's redraw after a mark and the overlay lifecycle. The other
 half drives the real `legu` binary against real scratch git repositories —
 including the one test that matters most, that `legu--file-hash` reproduces
 the CLI's `:file-hash` byte for byte on files with tabs, CRLF, a non-UTF-8

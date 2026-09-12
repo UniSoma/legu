@@ -116,6 +116,61 @@ With a prefix argument THIS-FILE, scope it to the current file."
 (defvar legu-list--anchor-width 46
   "Column the row text starts at, sized to the section being drawn.")
 
+
+;;;; Keeping the cursor on the row it was on
+;;
+;; A render erases the buffer, and every mark takes a row out of it.  Point
+;; is put back on the row it was on, or on the next row still drawn, so a
+;; batch of marks leaves the cursor on the next thing to read rather than
+;; that many rows past it.  Each window showing the queue gets its own
+;; `window-point' back: an undisplayed buffer's point is not the one the
+;; reader in the other window is looking at.
+
+(defun legu-list--identity ()
+  "The row at point, as a key that survives a render, or nil.
+A stale row is its region: a mark that answers it is what removes it.  A
+queue row is its file, whose anchor moves to the next gap as the file is
+read, so the range is no part of what it is."
+  (when-let* ((path (get-text-property (point) 'legu-path)))
+    (if (eq (get-text-property (point) 'legu-kind) 'stale)
+        (list 'stale path
+              (get-text-property (point) 'legu-start)
+              (get-text-property (point) 'legu-end))
+      (list 'next path))))
+
+(defun legu-list--anchor (pos)
+  "What to put a cursor at POS back on after a render.
+The line number is the fallback, for a cursor parked off any row."
+  (save-excursion
+    (goto-char pos)
+    (let ((line (line-number-at-pos))
+          (wanted nil))
+      (when (legu-list--identity)
+        (beginning-of-line)
+        (while (not (eobp))
+          (when-let* ((id (legu-list--identity))) (push id wanted))
+          (forward-line 1)))
+      (cons line (nreverse wanted)))))
+
+(defun legu-list--goto-anchor (anchor)
+  "Put point back where ANCHOR says, in the buffer as it now stands.
+The rows wanted run from the one point was on to the end of the queue,
+in draw order, and the first of them still drawn wins -- which is how a
+cursor on the last stale region lands in the next section rather than on
+a heading."
+  (let ((rows (make-hash-table :test #'equal)))
+    (goto-char (point-min))
+    (while (not (eobp))
+      (when-let* ((id (legu-list--identity)))
+        (unless (gethash id rows) (puthash id (point) rows)))
+      (forward-line 1))
+    (goto-char (point-min))
+    (unless (seq-some (lambda (id)
+                        (when-let* ((pos (gethash id rows)))
+                          (goto-char pos)))
+                      (cdr anchor))
+      (forward-line (1- (car anchor))))))
+
 (defun legu-list--face (text face)
   "TEXT in FACE, whether or not font-lock is on.
 `compilation-mode' fontifies, and fontification strips `face'; what it
@@ -149,7 +204,9 @@ with a few lines read does not look like one with none."
   (let* ((root legu-list--root)
          (snapshot (legu-snapshot root))
          (inhibit-read-only t)
-         (line (line-number-at-pos (point)))
+         (anchor (legu-list--anchor (point)))
+         (windows (mapcar (lambda (w) (cons w (legu-list--anchor (window-point w))))
+                          (get-buffer-window-list nil nil t)))
          (legu-list--record-cache (make-hash-table :test #'equal))
          (cov (plist-get snapshot :coverage)))
     (erase-buffer)
@@ -177,8 +234,10 @@ with a few lines read does not look like one with none."
                                    '("g" "refresh") '("c" "coverage"))
                   'legu-list-count)
             "\n")
-    (goto-char (point-min))
-    (forward-line (1- line))))
+    (pcase-dolist (`(,window . ,a) windows)
+      (legu-list--goto-anchor a)
+      (set-window-point window (point)))
+    (legu-list--goto-anchor anchor)))
 
 (defun legu-list--keys (&rest pairs)
   "The footer: every (KEY LABEL) in PAIRS, keys picked out."
@@ -521,6 +580,11 @@ nobody has opened -- that one is always confirmed by name."
   (let* ((rows (legu-list--rows-in-region))
          (whole (seq-remove (lambda (r) (eq (plist-get r :kind) 'stale)) rows)))
     (unless rows (user-error "legu: no row at point"))
+    ;; The rows are collected; the selection has been consumed.  A render
+    ;; while the writes are in flight erases the buffer under the mark, and
+    ;; what is left is a region from `point-min' to point.  (Evil's own
+    ;; visual state is ended by `legu-evil--exit-visual-state'.)
+    (deactivate-mark)
     (cond
      (whole
       (unless (yes-or-no-p

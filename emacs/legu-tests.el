@@ -594,6 +594,150 @@ parse is not skipped, since the lines a merge conflict wraps are records."
   (should (equal "100.0%" (legu-list--percent 1))))
 
 
+;;;; The queue redraws itself when a mark lands
+
+(defmacro legu-test--with-queue (&rest body)
+  "Run BODY in a queue buffer on a snapshot of two files.
+`b.el' has two stale regions, `a.el' has never been read, so the buffer
+holds two STALE rows and one NEXT row, in that order."
+  (declare (indent 0))
+  `(let ((legu--snapshots (make-hash-table :test #'equal))
+         (rows (make-hash-table :test #'equal))
+         (stale (make-hash-table :test #'equal)))
+     (puthash "a.el" (list :total 100 :reviewed 0 :stale 0 :unreviewed 100
+                           :ranges nil)
+              rows)
+     (puthash "b.el" (list :total 50 :reviewed 40 :stale 10 :unreviewed 0
+                           :ranges '((1 . 40)))
+              rows)
+     (puthash "b.el" (list (list 41 45 "changed" "stale")
+                           (list 46 50 "changed" "stale"))
+              stale)
+     (puthash "/tmp/x/"
+              (list :state 'fresh :started (current-time)
+                    :rows rows :stale stale
+                    :coverage (list :files 2 :lines 150 :reviewed 40 :stale 10
+                                    :never 100)
+                    :queue (legu--queue rows legu-next-limit))
+              legu--snapshots)
+     (with-temp-buffer
+       (legu-list-mode)
+       (setq legu-list--root "/tmp/x/")
+       (legu-list--render)
+       ,@body)))
+
+(defun legu-test--queue-row-at-point ()
+  "The anchor of the row point is on, as `path:start:end'."
+  (format "%s:%s:%s"
+          (get-text-property (point) 'legu-path)
+          (get-text-property (point) 'legu-start)
+          (get-text-property (point) 'legu-end)))
+
+(defun legu-test--goto-queue-row (anchor)
+  "Put point on the row whose anchor is ANCHOR."
+  (goto-char (point-min))
+  (search-forward (concat anchor ":"))
+  (beginning-of-line))
+
+(ert-deftest legu-test-a-mark-shows-in-the-queue-before-a-snapshot-lands ()
+  ;; The patch is the only thing that speaks until the debounced refresh
+  ;; lands, seconds later; nothing here runs the CLI.
+  (legu-test--with-queue
+    (should (string-match-p "a\\.el:1:100:" (buffer-string)))
+    (legu--patch-snapshot "/tmp/x/" "a.el" :reviewed '((1 . 100)))
+    (let ((text (substring-no-properties (buffer-string))))
+      (should-not (string-match-p "a\\.el:" text))
+      (should (string-match-p "^  reviewed +140 " text)))))
+
+(ert-deftest legu-test-a-re-mark-takes-its-stale-row-out-of-the-queue ()
+  (legu-test--with-queue
+    (legu--patch-snapshot "/tmp/x/" "b.el" :reviewed '((41 . 45)))
+    (let ((text (substring-no-properties (buffer-string))))
+      (should-not (string-match-p "b\\.el:41:45:" text))
+      (should (string-match-p "b\\.el:46:50:" text))
+      (should (string-match-p "^  stale +5 " text)))))
+
+(ert-deftest legu-test-forgetting-a-whole-file-empties-its-rows ()
+  ;; Forget names no region, and the whole file is what it drops: the stale
+  ;; regions go with the records they were derived from, and the file comes
+  ;; back as unreviewed.
+  (legu-test--with-queue
+    (legu--patch-snapshot "/tmp/x/" "b.el" :unreviewed '((1 . 50)))
+    (let ((text (substring-no-properties (buffer-string))))
+      (should-not (string-match-p "b\\.el:41:45:" text))
+      (should-not (string-match-p "b\\.el:46:50:" text))
+      (should (string-match-p "b\\.el:1:50:" text))
+      (should (string-match-p "^  unreviewed +150 " text)))))
+
+(ert-deftest legu-test-the-queue-cursor-lands-on-the-next-row ()
+  (legu-test--with-queue
+    (legu-test--goto-queue-row "b.el:41:45")
+    (legu--patch-snapshot "/tmp/x/" "b.el" :reviewed '((41 . 45)))
+    (should (equal "b.el:46:50" (legu-test--queue-row-at-point)))))
+
+(ert-deftest legu-test-the-queue-cursor-crosses-into-the-next-section ()
+  ;; The last stale region answered, the cursor follows the reading order
+  ;; into NEXT rather than stopping on a heading.
+  (legu-test--with-queue
+    (legu-test--goto-queue-row "b.el:46:50")
+    (legu--patch-snapshot "/tmp/x/" "b.el" :reviewed '((46 . 50)))
+    (should (equal "a.el:1:100" (legu-test--queue-row-at-point)))))
+
+(ert-deftest legu-test-a-queue-row-keeps-the-cursor-as-its-gaps-shrink ()
+  ;; A queue row is its file: its anchor moves to the next gap, and that
+  ;; is not a different row.
+  (legu-test--with-queue
+    (legu-test--goto-queue-row "a.el:1:100")
+    (legu--patch-snapshot "/tmp/x/" "a.el" :reviewed '((1 . 60)))
+    (should (equal "a.el:61:100" (legu-test--queue-row-at-point)))))
+
+(ert-deftest legu-test-the-queue-keeps-the-cursor-of-a-window-it-is-not-in ()
+  ;; A render erases the buffer, which collapses `window-point' to 1.  The
+  ;; reader watching the queue from the next window over is the whole reason
+  ;; a mark redraws it, and that window's cursor is not the buffer's.
+  (let ((buffer (get-buffer-create "*legu test queue*")))
+    (unwind-protect
+        (save-window-excursion
+          (let ((legu--snapshots (make-hash-table :test #'equal))
+                (rows (make-hash-table :test #'equal))
+                (stale (make-hash-table :test #'equal))
+                (window (split-window)))
+            (puthash "a.el" (list :total 100 :reviewed 0 :stale 0
+                                  :unreviewed 100 :ranges nil)
+                     rows)
+            (puthash "b.el" (list :total 50 :reviewed 0 :stale 0
+                                  :unreviewed 50 :ranges nil)
+                     rows)
+            (puthash "/tmp/x/"
+                     (list :state 'fresh :started (current-time)
+                           :rows rows :stale stale
+                           :coverage (list :files 2 :lines 150 :reviewed 0
+                                           :stale 0 :never 150)
+                           :queue (legu--queue rows legu-next-limit))
+                     legu--snapshots)
+            (with-current-buffer buffer
+              (legu-list-mode)
+              (setq legu-list--root "/tmp/x/")
+              (legu-list--render))
+            (set-window-buffer window buffer)
+            (set-window-point
+             window
+             (with-current-buffer buffer
+               (legu-test--goto-queue-row "b.el:1:50")
+               (point)))
+            ;; The buffer's own cursor is on the other row, so restoring it
+            ;; alone would leave this window on `a.el'.
+            (with-current-buffer buffer
+              (legu-test--goto-queue-row "a.el:1:100"))
+            (legu--patch-snapshot "/tmp/x/" "a.el" :reviewed '((1 . 50)))
+            (with-current-buffer buffer
+              (should (equal "a.el:51:100" (legu-test--queue-row-at-point)))
+              (save-excursion
+                (goto-char (window-point window))
+                (should (equal "b.el:1:50" (legu-test--queue-row-at-point)))))))
+      (kill-buffer buffer))))
+
+
 ;;;; JSON edge cases
 
 (ert-deftest legu-test-json-null-and-false-are-nil ()

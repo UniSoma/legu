@@ -769,7 +769,13 @@ Ordering reproduces the CLI's `next' exactly."
 (defun legu--patch-snapshot (root relpath &rest ops)
   "Apply OPS to ROOT's cached row for RELPATH without a refresh.
 OPS is a plist of `:reviewed' and `:unreviewed' range sets.  The
-generation is not bumped: the next real snapshot replaces this wholesale."
+generation is not bumped: the next real snapshot replaces this wholesale.
+
+Every buffer drawn from the snapshot is redrawn here, which is the only
+thing that shows a mark in the queue before the debounced refresh lands
+seconds later.  A patch only ever retires stale entries a mark answered
+and confirms lines reviewed, never the reverse, so this stays inside
+what ADR-0011 lets the editor say on its own."
   (when-let* ((snapshot (legu-snapshot root))
               (rows (plist-get snapshot :rows))
               (row (gethash relpath rows)))
@@ -781,13 +787,16 @@ generation is not bumped: the next real snapshot replaces this wholesale."
            (total (plist-get row :total))
            (ranges (legu--ranges-subtract
                     (legu--ranges-union (plist-get row :ranges) add) drop)))
-      ;; A re-mark answers the stale records it covers.
-      (when add
-        (puthash relpath
-                 (seq-remove (lambda (e)
-                               (and (nth 0 e) (legu--ranges-member add (nth 0 e))))
-                             (gethash relpath staleh))
-                 staleh))
+      ;; A re-mark answers the stale records it covers, and a forget takes
+      ;; them away with the records they came from: either way the entry
+      ;; stops describing anything.
+      (dolist (gone (list add drop))
+        (when gone
+          (puthash relpath
+                   (seq-remove (lambda (e)
+                                 (and (nth 0 e) (legu--ranges-member gone (nth 0 e))))
+                               (gethash relpath staleh))
+                   staleh)))
       (let* ((stale-ranges
               (legu--ranges-normalize
                (delq nil (mapcar (lambda (e)
@@ -806,7 +815,9 @@ generation is not bumped: the next real snapshot replaces this wholesale."
                                         (plist-get cov :reviewed)
                                         (plist-get cov :stale))))
         (plist-put snapshot :queue (legu--queue rows legu-next-limit))
-        (puthash root snapshot legu--snapshots)))))
+        (puthash root snapshot legu--snapshots)
+        (when (featurep 'legu-list) (legu-list-refresh-buffers root))
+        (when (featurep 'legu-dired) (legu-dired-refresh-buffers root))))))
 
 
 ;;;; The write queue
@@ -1402,6 +1413,11 @@ The record is recoverable from git: `.review/' is committed."
   (let* ((root legu--root)
          (rel legu--relpath)
          (region (legu--target-region arg))
+         (lines (legu--buffer-lines))
+         ;; No region is the whole file, the same as it is for a mark: the
+         ;; patch has to name the lines, or forgetting a file leaves the
+         ;; queue and the dired column drawing state that is gone.
+         (dropped (list (or region (cons 1 (max 1 lines)))))
          (target (legu--target-string rel region)))
     (unless (yes-or-no-p
              (format "Forget review state at %s?  (recoverable from git) " target))
@@ -1413,8 +1429,7 @@ The record is recoverable from git: `.review/' is committed."
          (if (eq status 'ok)
              (progn
                (message "%s" (string-trim stdout))
-               (legu--patch-snapshot root rel :unreviewed
-                                     (and region (list (cons (car region) (cdr region)))))
+               (legu--patch-snapshot root rel :unreviewed dropped)
                (when (buffer-live-p buffer)
                  (with-current-buffer buffer (legu--repaint))))
            (legu--record-failure root "forget" target stderr)
