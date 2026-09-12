@@ -53,8 +53,10 @@ The state of a region a human has read and whose content is unchanged since.
 _Avoid_: read, audited, checked, seen, covered
 
 **Stale**:
-The state of a region a human has read whose content has changed since. Any
-change inside the region makes the whole region stale.
+The state of a line a human has read whose content has changed since. Only
+the lines a change touched are stale; the rest of the region stays reviewed,
+on the evidence of the same review record. A pure deletion leaves one stale
+line where the deleted lines were.
 _Avoid_: dirty, outdated, invalidated
 
 **Missing**:
