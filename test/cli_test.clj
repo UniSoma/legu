@@ -1074,6 +1074,271 @@
     (edit-73-97! dir)
     (is (= [[1 150 "stale" "content changed" false]] (anchors dir "long.txt")))))
 
+;; ------------------------------------------------------- relative indentation
+
+;; ADR-0019: trailing whitespace never matters and leading whitespace matters
+;; relative to the region. Two texts are the same read when, after removing the
+;; leading whitespace common to every line of each, they trim equal at the end
+;; of each line. The fixtures below are Python, where the indentation carries
+;; the meaning a reader of the region signed for.
+
+(def ^:private totals-py
+  (str "def head(rows):\n"
+       "    return rows[0]\n"
+       "\n"
+       "def totals(rows):\n"
+       "    total = 0\n"
+       "    for row in rows:\n"
+       "        total += row.amount\n"
+       "    return total\n"))
+
+(defn- totals-repo!
+  "A repo whose totals.py holds two functions, the second of them, lines 4-8,
+   read and marked. An edit to `head` is then an edit outside the region and
+   inside the same file."
+  []
+  (let [dir (scratch-repo!)]
+    (commit! dir {"totals.py" totals-py})
+    (legu! dir "mark" "totals.py:4-8" "--reviewer" reviewer)
+    dir))
+
+(deftest a-line-dedented-out-of-its-block-is-stale
+  (let [dir (totals-repo!)]
+    ;; the accumulation leaves the loop with no other character touched, so its
+    ;; offset from the lines around it changed and it alone is stale
+    (write-files! dir {"totals.py" (str/replace totals-py
+                                               "        total += row.amount"
+                                               "    total += row.amount")})
+    (is (= [[4 6 "reviewed" nil false]
+            [7 7 "stale" "content changed" false]
+            [8 8 "reviewed" nil false]]
+           (anchors dir "totals.py")))
+    (is (= [{:path "totals.py" :start 7 :end 7
+             :reason "content changed" :state "stale"}]
+           (:stale (stale-json dir))))))
+
+(defn- indented
+  "`text` with every line from `from` on given four more spaces, as wrapping
+   them in a new block would leave them."
+  [text from]
+  (str/join (map-indexed (fn [i l] (str (when (>= (inc i) from) "    ") l "\n"))
+                         (str/split-lines text))))
+
+(defn- longer-head
+  "totals.py with two lines added to `head`, which is outside the marked
+   region and moves it down the file."
+  [text]
+  (str/replace text "    return rows[0]\n"
+               "    if not rows:\n        return None\n    return rows[0]\n"))
+
+(deftest a-block-reindented-together-stays-reviewed
+  (let [dir (totals-repo!)]
+    (write-files! dir {"totals.py" (indented totals-py 4)})
+    (is (= [[4 8 "reviewed" nil false]] (anchors dir "totals.py")))
+    (is (= [] (:stale (stale-json dir))))))
+
+(deftest a-block-reindented-beside-an-edit-in-its-file-stays-reviewed
+  (let [dir (totals-repo!)]
+    ;; the edit to `head` moves the region two lines down the file, so the
+    ;; lines the indentation is judged against are the ones it landed on
+    (write-files! dir {"totals.py" (indented (longer-head totals-py) 6)})
+    (is (= [[6 10 "reviewed" nil true]] (anchors dir "totals.py")))
+    (is (= [] (:stale (stale-json dir))))))
+
+(deftest wrapping-a-block-in-a-new-if-leaves-only-the-inserted-line-stale
+  (let [dir (totals-repo!)]
+    (write-files! dir {"totals.py" (str/replace (indented totals-py 5)
+                                                "def totals(rows):\n"
+                                                "def totals(rows):\n    if rows:\n")})
+    (is (= [[4 4 "reviewed" nil false]
+            [5 5 "stale" "content changed" false]
+            [6 9 "reviewed" nil true]]
+           (anchors dir "totals.py")))
+    (is (= [{:path "totals.py" :start 5 :end 5
+             :reason "content changed" :state "stale"}]
+           (:stale (stale-json dir))))))
+
+(deftest trailing-whitespace-a-crlf-flip-and-a-lost-last-newline-are-no-change
+  (let [dir (totals-repo!)]
+    (write-files! dir {"totals.py" (-> totals-py
+                                       (str/replace "    total = 0\n" "    total = 0  \n")
+                                       (str/replace "\n" "\r\n")
+                                       (str/replace #"\r\n$" ""))})
+    (is (= [[4 8 "reviewed" nil false]] (anchors dir "totals.py")))
+    (is (= [] (:stale (stale-json dir))))))
+
+(def ^:private tabbed-py
+  (str "def totals(rows):\n"
+       "\ttotal = 0\n"
+       "\tfor row in rows:\n"
+       "\t\ttotal += row.amount\n"
+       "\treturn total\n"))
+
+(deftest tabs-converted-to-spaces-are-stale
+  (let [dir (scratch-repo!)]
+    (commit! dir {"tabbed.py" tabbed-py})
+    (legu! dir "mark" "tabbed.py:1-5" "--reviewer" reviewer)
+    ;; a tab and four spaces are different characters, so the nesting inside
+    ;; the loop lands at a different offset from the lines around it: a
+    ;; reformat, which ADR-0003 already calls stale. A file indented at one
+    ;; level throughout would be a uniform shift and stay reviewed, which is
+    ;; why the fixture nests.
+    (write-files! dir {"tabbed.py" (str/replace tabbed-py "\t" "    ")})
+    (is (= [[1 1 "reviewed" nil false]
+            [2 5 "stale" "content changed" false]]
+           (anchors dir "tabbed.py")))
+    (is (= [{:path "tabbed.py" :start 2 :end 5
+             :reason "content changed" :state "stale"}]
+           (:stale (stale-json dir))))))
+
+(deftest a-record-no-commit-confirms-keeps-the-trim-alone
+  (let [dir (scratch-repo!)]
+    ;; the mark reads a working tree the commit it cites never held, so no text
+    ;; says how the lines it read were laid out and the trim is all there is
+    (commit! dir {"totals.py" (str/replace totals-py "    total = 0" "    total = 1")})
+    (write-files! dir {"totals.py" totals-py})
+    (legu! dir "mark" "totals.py:4-8" "--reviewer" reviewer)
+    (write-files! dir {"totals.py" (str/replace totals-py
+                                                "        total += row.amount"
+                                                "    total += row.amount")})
+    (is (= [[4 8 "reviewed" nil false]] (anchors dir "totals.py")))))
+
+(deftest a-line-dedented-inside-a-block-that-moved-is-the-only-stale-one
+  (let [dir (totals-repo!)]
+    ;; the whole function went a level deeper and the accumulation came a level
+    ;; back out of the loop: the block moved together and only the line that
+    ;; left it changed its offset from the rest
+    (write-files! dir {"totals.py" (str/replace (indented totals-py 4)
+                                                "            total += row.amount"
+                                                "        total += row.amount")})
+    (is (= [[4 6 "reviewed" nil false]
+            [7 7 "stale" "content changed" false]
+            [8 8 "reviewed" nil false]]
+           (anchors dir "totals.py")))))
+
+(deftest a-block-reindented-beside-an-edit-inside-the-region-stays-reviewed
+  (let [dir (totals-repo!)]
+    ;; the edit and the reindent land in one hunk, and what the wrap shares
+    ;; with what it replaced comes off it: only the edited line is stale
+    (write-files! dir {"totals.py" (-> totals-py
+                                       (str/replace "    total = 0" "    total = 1")
+                                       (indented 6))})
+    (is (= [[4 4 "reviewed" nil false]
+            [5 5 "stale" "content changed" false]
+            [6 8 "reviewed" nil false]]
+           (anchors dir "totals.py")))))
+
+;; ------------------------------------------------------- marks on a dirty tree
+
+;; ADR-0018: a mark made on a dirty working tree cites a commit whose text it
+;; did not read, so the commits after it that touched the path are tried in
+;; order and the first that confirms the record's hash is diffed against. The
+;; search is capped; past the cap the record falls back to whole-region stale,
+;; as does one citing a commit git does not have.
+
+(def ^:private drafted
+  "long.txt as the working tree held it when it was marked: five draft lines
+   between line 40 and line 41 of the committed text, so `numbered` line n
+   below the drafts sits at line n+5."
+  (str (numbered 1 40) (numbered "draft" 1 5) (numbered 41 150)))
+
+(defn- dirty-mark!
+  "A repo whose long.txt was marked whole while the five draft lines were
+   still uncommitted, so the commit the record cites does not hold the text
+   it read."
+  []
+  (let [dir (scratch-repo!)]
+    (commit! dir {"long.txt" (numbered 1 150)})
+    (write-files! dir {"long.txt" drafted})
+    (legu! dir "mark" "long.txt:1-155" "--reviewer" reviewer)
+    dir))
+
+(defn- edited-at
+  "`drafted` with the `numbered` lines `from`..`to` rewritten."
+  [from to]
+  (str (numbered 1 40) (numbered "draft" 1 5) (numbered 41 (dec from))
+       (numbered "edit" from to) (numbered (inc to) 150)))
+
+(deftest a-mark-taken-on-a-dirty-tree-fragments-against-the-commit-that-follows
+  (let [dir (dirty-mark!)]
+    (commit! dir {"long.txt" drafted})
+    (write-files! dir {"long.txt" (edited-at 100 101)})
+    (is (= [[1 104 "reviewed" nil false]
+            [105 106 "stale" "content changed" false]
+            [107 155 "reviewed" nil false]]
+           (anchors dir "long.txt")))
+    (is (= [{:path "long.txt" :start 105 :end 106
+             :reason "content changed" :state "stale"}]
+           (:stale (stale-json dir))))))
+
+(deftest the-search-passes-a-later-commit-that-does-not-confirm
+  (let [dir (dirty-mark!)]
+    ;; the commit right after the mark holds the drafts but not the text that
+    ;; was read; the one after it holds it exactly
+    (commit! dir {"long.txt" (edited-at 60 60)})
+    (commit! dir {"long.txt" drafted})
+    (write-files! dir {"long.txt" (edited-at 100 101)})
+    (is (= [[1 104 "reviewed" nil false]
+            [105 106 "stale" "content changed" false]
+            [107 155 "reviewed" nil false]]
+           (anchors dir "long.txt")))))
+
+(deftest the-first-confirming-commit-is-what-the-record-is-diffed-against
+  (let [dir (dirty-mark!)]
+    ;; Two commits confirm, and the diff is taken from the first: what the
+    ;; second one changed inside the region is stale, because nobody read it.
+    ;; Diffing against HEAD instead would report only the working-tree edit.
+    ;; Which of two confirming commits was used is otherwise unobservable —
+    ;; both hold the same text, so both give the same fragments.
+    (commit! dir {"long.txt" drafted})
+    (commit! dir {"long.txt" (edited-at 60 60)})
+    (write-files! dir {"long.txt" (str (numbered 1 40) (numbered "draft" 1 5)
+                                       (numbered 41 59) (numbered "edit" 60 60)
+                                       (numbered 61 99) (numbered "edit" 100 101)
+                                       (numbered 102 150))})
+    (is (= [[1 64 "reviewed" nil false]
+            [65 65 "stale" "content changed" false]
+            [66 104 "reviewed" nil false]
+            [105 106 "stale" "content changed" false]
+            [107 155 "reviewed" nil false]]
+           (anchors dir "long.txt")))))
+
+(deftest a-record-citing-a-commit-git-does-not-have-goes-stale-whole
+  (let [dir (dirty-mark!)
+        sidecar (fs/file dir ".review" "sidecars" "long.txt.jsonl")]
+    (commit! dir {"long.txt" drafted})
+    ;; nothing can be searched forward from a commit that is not in the repo
+    (spit sidecar (str/replace (slurp sidecar) #"\"commit\":\"[0-9a-f]+\""
+                               "\"commit\":\"0000000000000000000000000000000000000000\""))
+    (write-files! dir {"long.txt" (edited-at 100 101)})
+    (is (= [[1 155 "stale" "content changed" false]] (anchors dir "long.txt")))))
+
+(deftest the-forward-search-stops-after-a-few-commits
+  (let [dir (dirty-mark!)]
+    ;; Six commits touch the path and only the last holds what was read. The
+    ;; cap in legu is five, so the search never reaches it and the record
+    ;; falls back to whole-region stale; a case above proves a commit inside
+    ;; the cap is found. Raising the cap in legu makes this case pass wrongly,
+    ;; so it moves with it.
+    (doseq [n (range 60 65)]
+      (commit! dir {"long.txt" (edited-at n n)}))
+    (commit! dir {"long.txt" drafted})
+    (write-files! dir {"long.txt" (edited-at 100 101)})
+    (is (= [[1 155 "stale" "content changed" false]] (anchors dir "long.txt")))
+    ;; The commits the search may try are found before any blob is read, so
+    ;; the five candidates are asked for in the batch the record's own commit
+    ;; is: one log, one batch, and no file read on its own.
+    (let [log (str (fs/file dir ".git" "git-trace.log"))
+          _ (apply p/sh {:dir dir :out :string :err :string
+                         :extra-env {"XDG_CONFIG_HOME" (config-home dir)
+                                     "GIT_TRACE" log}}
+                   legu ["stale" "--json"])
+          lines (str/split-lines (slurp log))
+          runs (fn [cmd] (count (filter #(str/includes? % cmd) lines)))]
+      (is (= [1 1 0] [(runs "log --reverse")
+                      (runs "cat-file --batch")
+                      (runs "git show ")])))))
+
 ;; ---------------------------------------------------------------- keys
 
 ;; ADR-0016: each user signs with a key kept under their config directory, and

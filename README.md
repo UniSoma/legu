@@ -107,43 +107,85 @@ $ legu --version --json
 ## How staleness works
 
 A review record stores the region's line range, the SHA of HEAD at review time,
-a hash of the whole file, and a hash of the region's *normalized* content — each
-line stripped of leading and trailing whitespace, and nothing more aggressive
-than that. A mark also retires every earlier record that now anchors fully
-inside the marked range, so re-reading a stale region at the range it now
-anchors to leaves one record, not two. A record the mark only partly covers
-stays: the part outside was not re-read
-([ADR-0013](docs/adr/0013-a-mark-supersedes-only-what-it-contains.md)).
+a hash of the whole file, and a hash of the region's content with every line
+trimmed at both ends. That hash is how legu finds the region again: it is
+confirmed against the file as it stood at one commit, and from there legu holds
+the exact text the reviewer read. A mark also retires every earlier record that
+now anchors fully inside the marked range, so re-reading a stale region at the
+range it now anchors to leaves one record, not two. A record the mark only
+partly covers stays: the lines outside it were not re-read
+([ADR-0013](docs/adr/0013-a-mark-supersedes-only-what-it-contains.md)), and that
+record is the only evidence for the lines of it that are still reviewed.
+
+A diff says what changed only when it is taken from the text the reviewer read,
+so legu confirms the record's content hash against the file at the commit the
+record cites before it reads that commit's diff. A mark taken while the working
+tree was dirty cites a commit whose text it never read; the commits after it
+that touched the path are then tried in order, a few at most, and the first that
+confirms is the one diffed against. A record no commit confirms has no such
+text, so it is judged by the trimmed hash alone and goes stale over its whole
+region when that hash stops matching, as does a record made where there is no
+git.
 
 To decide a region's current state, legu:
 
 1. tries to anchor it in the file it was read in — byte-identical file means
    *reviewed* immediately; otherwise it diffs that file as it was at the
    reviewed commit against the working tree (`git diff -U0`, one call per
-   commit for every file that needs it), shifts the region across the hunks
-   above it, and re-hashes;
+   commit for every file that needs it), carries the region across the hunks
+   above it, and calls it *reviewed* when the lines it lands on re-hash equal
+   and are the same read as the region at the confirming commit;
 2. if that fails, looks for the block elsewhere in the same file;
 3. if that fails, follows the file: the rename git reports since the reviewed
    commit (at a low similarity threshold, so a small file that was renamed
    *and* edited is still matched), and — only when the original path is gone —
    files added since then that contain the reviewed block;
-4. reports *stale* at the best location it found, or *missing* if the file is
-   gone entirely.
+4. reports *missing* if the file is gone entirely, and otherwise reports the
+   region in fragments: every hunk that landed inside it is stale at the lines
+   that hunk wrote, and the runs of lines between the hunks stay reviewed where
+   those hunks left them
+   ([ADR-0018](docs/adr/0018-staleness-is-per-hunk-not-per-region.md)).
 
-Two consequences worth stating plainly:
+Four consequences worth stating plainly:
 
-- A region that merely **moved** is not stale — whether it shifted, was cut and
-  pasted elsewhere in the file, or the file was renamed. Only changed content is.
-- A whitespace-only edit inside a region is not a change, because the hash is
-  computed on normalized lines.
-- Any real change inside a region makes the **whole** region stale. Mark regions
-  roughly the size you can hold in your head at once.
+- A region that merely **moved** is not stale — whether an edit above it
+  carried it down the file, it was cut and pasted elsewhere in the file, or the
+  file was renamed. Only changed content is. The search for a region that
+  moved looks for the whole of it, so a run of lines cut out of one and pasted
+  elsewhere carries no review with it: it leaves a seam behind and counts
+  unreviewed where it landed.
+- Trailing whitespace is never a change, and leading whitespace counts relative
+  to the region. Two texts are the same read when, after removing the leading
+  whitespace common to every line of each, they trim equal at the end of every
+  line. Wrapping a block in a new `if` carries its lines together and the block
+  stays reviewed, with only the inserted line stale; dedenting one line out of
+  that block changes its offset from the rest, and it alone is stale with no
+  other character touched. Converting tabs to spaces pulls the levels of a
+  nested block apart, so it is stale, as any other reformat is
+  ([ADR-0019](docs/adr/0019-indentation-is-significant-relative-to-the-region.md)).
+- A change that leaves the region no line of its own is stale at one line, the
+  **seam**. A deletion seams on the line after it when that line is still
+  inside the region, and on the line before it otherwise, so the seam is always
+  a line the reviewer read. A region whose every line was deleted has no seam
+  and is stale at the range it was read at, clamped to the file.
+- A change reaching into the region from outside is clipped to the lines the
+  record read: it is stale from the region's own edge, never above it and never
+  past the end the region projects to, and the lines nobody read stay
+  unreviewed rather than going stale. A change that reached in and then shrank
+  below where the region began in it wrote no line the record can claim, so it
+  leaves a seam, as a deletion does.
+
+Region size does not decide how much of a record goes stale, but it is still
+the range that record vouches for: one reviewer's word, over those lines, at
+one commit. The fragments that stay reviewed carry no hash of their own and are
+trusted on the diff alone, and `mark` and `forget` act on whole records. Mark
+regions roughly the size you can hold in your head at once.
 
 A block-move is only trusted when it is unambiguous: exactly one matching block
 in the file now, and no twin of it at review time. Two identical blocks where
 one was rewritten reports *stale*, which is the honest answer.
 
-A mark relocates only when git reports a **rename**, never a copy. If a file is
+A mark follows a file only when git reports a **rename**, never a copy. If it is
 copied and the original then edited inside a reviewed region, the original goes
 stale and the copy counts as unreviewed — the alternative would let a copy absorb
 the mark and hide a real change. The cost is that a rename which also leaves a
@@ -243,9 +285,12 @@ for the rest of the repository.
 }
 ```
 
-Current `start` and `end` values are null when a record is missing. The
-`original` object retains its recorded bounds. Overlapping review records stay
-separate, and lines outside the returned records are unreviewed.
+A record a change landed inside comes back as one item per fragment: the stale
+lines and the reviewed runs between them, each carrying the whole record's
+provenance under `original` and its own `moved`. Current `start` and `end`
+values are null when a record is missing. The `original` object retains its
+recorded bounds. Overlapping review records stay separate, and lines outside
+the returned records are unreviewed.
 
 Text and binary files use `condition: "present"`. Missing and unreadable files
 use their condition name and report `total: 0`. Empty and binary files have
@@ -507,9 +552,11 @@ same limit. Review a change to `.review/signers` the way you review code.
 
 `legu ticket` stores a ticket id against a region. The ticket's content and
 lifecycle belong to a ticket tracker; legu owns only the anchor, and re-anchors
-it exactly the way it re-anchors review regions. A ticket reference is an
-anchor of its own: re-marking the lines it sits in retires the review record,
-not the reference.
+it exactly the way it re-anchors review regions, except that a reference is
+never fragmented: a change anywhere inside it leaves the whole region stale,
+because the reference points at lines rather than vouching for them. A ticket
+reference is an anchor of its own: re-marking the lines it sits in retires the
+review record, not the reference.
 
 ## Outside git
 
@@ -552,9 +599,6 @@ The Emacs package has its own ERT suite, documented under
 
 ## Known limits
 
-- A region only partly covered by a later mark survives as its own record;
-  lines are counted once, but `stale` names the old record's whole range until
-  it is re-marked in full or forgotten.
 - Content moved between two files that both still exist is stale, not followed.
 - `--order cochange` reads the history under each file's current path, so a
   file's score starts at its rename: the commits it changed in under its old

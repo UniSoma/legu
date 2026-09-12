@@ -1064,7 +1064,10 @@ record counts only where no reviewed one covers it, and the ranges
       (should (plist-get (legu-sidecar-records root path) :regions)))))
 
 (ert-deftest legu-test-integration-whitespace-only-edits-are-not-changes ()
-  (legu-test--with-repo (list (cons "a.txt" "  alpha  \nbeta\t\ngamma\n"))
+  ;; ADR-0019 amends ADR-0003: the dedent is the same on every line and the
+  ;; rest is trailing, so the region reads the same as it did. A line dedented
+  ;; on its own would not, and the CLI suite pins that.
+  (legu-test--with-repo (list (cons "a.txt" "  alpha  \n  beta\t\n  gamma\n"))
     (legu-test--legu "mark" "a.txt:1-3")
     (with-temp-file (expand-file-name "a.txt" root) (insert "alpha\nbeta\ngamma\n"))
     (let ((data (legu--parse-json (nth 1 (legu-test--legu "stale" "--json")))))

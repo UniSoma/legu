@@ -208,6 +208,34 @@
   [lines]
   (sha256 (str/join "\n" (map str/trim lines))))
 
+(defn- indent-of
+  "The run of whitespace a line opens with."
+  [^String l]
+  (re-find #"^\s*" l))
+
+(defn- common-prefix [^String a ^String b]
+  (subs a 0 (count (take-while true? (map = a b)))))
+
+(defn- dedented
+  "`lines` with the leading whitespace common to every line of them taken off
+   and the end of each line trimmed. A blank line shares no indentation, so it
+   neither narrows the common run nor keeps one of its own."
+  [lines]
+  (let [held (remove str/blank? lines)
+        indent (if (seq held) (reduce common-prefix (map indent-of held)) "")
+        n (count indent)]
+    (mapv (fn [^String l] (if (str/blank? l) "" (str/trimr (subs l n)))) lines)))
+
+(defn same-read?
+  "ADR-0019: two texts are the same read when, after removing the leading
+   whitespace common to every line of each, they trim equal at the end of each
+   line. Trailing whitespace never matters and leading whitespace matters
+   relative to the region, so a block reindented together reads the same and a
+   line moved to another level does not."
+  [old-lines new-lines]
+  (and (= (count old-lines) (count new-lines))
+       (= (dedented old-lines) (dedented new-lines))))
+
 (defn- read-worktree-file
   "{:kind :text|:binary|:missing|:unreadable, :text, :lines, :line-count, :hash}.
    :lines is a delay: only anchoring a file that changed since review looks
@@ -664,13 +692,110 @@
                          ""))]
         (swap! commit-hunks into (for [p paths] [[commit p] (get by-path p)]))))))
 
-(defn prefetch!
-  "Ask git once for everything anchoring `records` will want: the hunks since
-   each cited commit and the file as it was at it. Every caller that anchors a
-   batch goes through here, so a new cache is wired in one place."
+(def ^:private forward-cap
+  "How many commits after the one a record cites the confirmation search tries
+   (ADR-0018). A mark taken mid-edit is committed within a commit or two of
+   itself, so a handful reaches the commit that holds what was read; past that
+   the path has moved on and the record is better reported stale than diffed
+   against a text nobody read. The cap bounds the blobs read and the diffs
+   taken; the `git log` that finds the candidates names hashes only and stops
+   at the commit the record cites."
+  5)
+
+;; [commit path] -> the commits after `commit` that touched `path`, oldest
+;; first, at most `forward-cap` of them.
+(def ^:private later-commits (atom {}))
+
+(defn- log-by-path
+  "The commits after `commit` that touched each of `paths`, oldest first, from
+   one `git log`. Parsed like `commit-file-sets`: a commit's own token is the
+   sentinel and its hash, and the newline git puts before the first path rides
+   on the token after it. Topological order, because the fixed dates of a
+   scripted history say nothing about which commit came first."
+  [commit paths]
+  (->> (str/split (or (apply git-ok "--literal-pathspecs" "log" "--reverse"
+                             "--topo-order" "--name-only" "-z"
+                             (str SENTINEL-FORMAT "%H") (str commit "..HEAD")
+                             "--" paths)
+                      "")
+                  NUL)
+       (reduce (fn [{:keys [at] :as acc} t]
+                 (let [t (str/replace-first t #"^\n" "")]
+                   (cond
+                     (str/starts-with? t SENTINEL)
+                     (assoc acc :at (subs t (count SENTINEL)))
+
+                     (or (str/blank? t) (nil? at)) acc
+                     :else (update-in acc [:by-path t] (fnil conj []) at))))
+               {})
+       :by-path))
+
+(defn- gather-later-commits!
+  "Find the commits the confirmation search may try for `records`, one
+   `git log` per commit they cite, so that no record spawns a process of its
+   own. They are gathered before any blob is read, so that the ones the search
+   wants are asked for in the same batch as the ones the records cite."
   [records]
-  (fetch-hunks! records)
-  (fetch-blobs! records))
+  (let [wanted (group-by first (uncached-pairs records needs-blob? later-commits))]
+    (doseq [[commit pairs] wanted
+            paths (runs-within 100000 (map second pairs))]
+      (let [by-path (log-by-path commit paths)]
+        (swap! later-commits into
+               (for [p paths] [[commit p] (vec (take forward-cap (get by-path p)))]))))))
+
+(defn- candidate-commits
+  "The commits tried after `commit` for a record at `path`. A pair no gather
+   asked for pays for a log of its own rather than going without, so a
+   caller's answer never depends on having been prefetched."
+  [commit path]
+  (if-not *git?*
+    []
+    (let [k [commit path]]
+      (when-not (contains? @later-commits k)
+        (swap! later-commits assoc k
+               (vec (take forward-cap (get (log-by-path commit [path]) path)))))
+      (get @later-commits k))))
+
+(defn- confirms?
+  "Does `path` at `commit` hold the lines `record` signed for? The hash is
+   ADR-0003's per-line trim, the one the record carries."
+  [{:keys [path start end content-hash]} commit]
+  (when-let [old (read-at-commit commit path)]
+    (let [old-lines (lines-of old)]
+      (and (<= end (count old-lines))
+           (= content-hash (norm-hash (subvec old-lines (dec start) end)))))))
+
+(defn anchor-commit
+  "The commit a record's diff is taken from: the one it cites when that holds
+   the text it signed for, else the first commit after it that does, and nil
+   when none of them does (ADR-0018). A mark made on a dirty working tree
+   cites a commit whose text it did not read, and the commit that carried the
+   edit into git is where the read it recorded can be found."
+  [{:keys [commit path] :as record}]
+  (when (needs-blob? record)
+    (if (confirms? record commit)
+      commit
+      (first (filter #(confirms? record %) (candidate-commits commit path))))))
+
+(defn- forward-records
+  "One copy of each record per commit the confirmation search may try it at,
+   for the batch that reads their blobs."
+  [records]
+  (for [record records
+        :when (needs-blob? record)
+        commit (candidate-commits (:commit record) (:path record))]
+    (assoc record :commit commit)))
+
+(defn prefetch!
+  "Ask git once for everything anchoring `records` will want: the commits the
+   confirmation search may try, the file as it was at each of them, and the
+   hunks since the commit each record is confirmed against. Every caller that
+   anchors a batch goes through here, so a new cache is wired in one place."
+  [records]
+  (gather-later-commits! records)
+  (fetch-blobs! (concat records (forward-records records)))
+  (fetch-hunks! (for [record records]
+                  (assoc record :commit (or (anchor-commit record) (:commit record))))))
 
 (defn project-range
   "Shift [start end] across hunks. :dirty? when a hunk touched the region itself."
@@ -775,6 +900,54 @@
   [{:keys [new-count] :as hunk}]
   (+ (new-first hunk) new-count -1))
 
+(defn- lines-run
+  "Lines `from` to `to`, 1-based and inclusive, or nil where the file does not
+   hold them all. Empty where `to` is below `from`, as a hunk's absent side is."
+  [lines from to]
+  (when (and (>= from 1) (<= to (count lines)))
+    (if (> from to) [] (subvec lines (dec from) to))))
+
+(defn- shrink-hunk
+  "ADR-0019: the hunk left when the lines its two sides share, whitespace
+   apart, come off each end. A block wrapped in a new `if` is then the one
+   line the wrap inserted, and a hunk that only moved whitespace is nothing at
+   all. nil for that nothing; the hunk unshrunk where the texts given are not
+   the ones it was taken from."
+  [{:keys [old-start old-count new-start new-count] :as hunk} old-lines new-lines]
+  (let [trimmed (fn [lines from to] (mapv str/trim (or (lines-run lines from to) [])))
+        o (trimmed old-lines old-start (old-last hunk))
+        n (trimmed new-lines (new-first hunk) (new-last hunk))]
+    (if-not (and (= old-count (count o)) (= new-count (count n)))
+      hunk
+      (let [head (count (take-while true? (map = o n)))
+            o* (subvec o head)
+            n* (subvec n head)
+            tail (count (take-while true? (map = (rseq o*) (rseq n*))))
+            oc (- (count o*) tail)
+            nc (- (count n*) tail)]
+        (when (or (pos? oc) (pos? nc))
+          ;; git names a side that wrote nothing by the line before what it
+          ;; removed, one line back from where its lines would start.
+          {:old-start (if (zero? old-count)
+                        old-start
+                        (+ old-start head (if (zero? oc) -1 0)))
+           :old-count oc
+           :new-start (if (zero? new-count)
+                        new-start
+                        (+ (new-first hunk) head (if (zero? nc) -1 0)))
+           :new-count nc})))))
+
+(defn- strict-hunks
+  "The hunks of a change, whitespace apart. A per-hunk equivalence test cannot
+   tell a block that moved with its wrapper from a line that moved out of one,
+   so the hunks are taken strictly here and the whitespace question is put to
+   each run of lines the strict hunks leave between them, in `reviewed-of`.
+   ADR-0019 sets the rule this serves but describes the steps differently, as
+   one check over the whole region; put to the region as a whole the question
+   cannot separate the two cases. lgu-01m29ywrrzjj carries that amendment."
+  [hunks old-lines new-lines]
+  (keep #(shrink-hunk % old-lines new-lines) hunks))
+
 (defn- overlap-of
   "The hunk's own old lines that lie inside the region [start end]. A hunk
    crossing the region's boundary lies inside it only in part, and that part
@@ -847,20 +1020,47 @@
         (seam-after? hunk end) [from (inc to)]
         :else [(dec from) to]))))
 
+(defn- reviewed-of
+  "The fragments a reviewed run of old lines [from to] leaves at `offset`.
+   ADR-0019's second stage: one reviewed fragment where the run reads the same
+   as it did, and otherwise the lines whose leading whitespace changed are the
+   ones that broke the offsets, so they go stale and the rest of the run stays
+   reviewed."
+  [from to offset old-lines new-lines]
+  (let [moved? (not (zero? offset))
+        reviewed (fn [lo hi] {:state :reviewed :start (+ lo offset) :end (+ hi offset)
+                              :moved? moved?})
+        old-run (lines-run old-lines from to)
+        new-run (lines-run new-lines (+ from offset) (+ to offset))]
+    (if (or (nil? old-run) (nil? new-run) (same-read? old-run new-run))
+      [(reviewed from to)]
+      ;; against the run's own common indentation, so a line that moved with
+      ;; the block around it is not the one that broke the offsets
+      (->> (map (fn [n was now] [n (= (indent-of was) (indent-of now))])
+                (range from (inc to)) (dedented old-run) (dedented new-run))
+           (partition-by second)
+           (mapv (fn [group]
+                   (let [lo (ffirst group)
+                         hi (first (last group))]
+                     (if (second (first group))
+                       (reviewed lo hi)
+                       {:state :stale :start (+ lo offset) :end (+ hi offset)
+                        :reason "content changed"}))))))))
+
 (defn- fragments-of
   "ADR-0018: the fragments the region [start end] now falls into, given the
    `hunks` between the file as it was reviewed and the file now. Each hunk
    touching the region is stale at the lines it wrote there, or, where it
    wrote none, at the seam it left; the run of lines between two hunks is
    still reviewed, at the location the hunks before it left it, and moved when
-   that location is not where it was read.
+   that location is not where it was read, unless ADR-0019 finds it is no
+   longer the read it was.
    nil where the region holds the one hunk this rule cannot split: one that
    swallowed the region whole and left no seam. The caller then reports the
    whole region stale."
-  [hunks start end]
+  [hunks start end old-lines new-lines]
   (let [touching (sort-by :old-start (filter #(touches-region? % start end) hunks))]
-    (when (and (seq touching)
-               (not-any? #(no-seam? % start end) touching))
+    (when (not-any? #(no-seam? % start end) touching)
       (loop [hs touching
              read-from start
              offset (reduce + 0 (for [h hunks :when (before-region? h start)]
@@ -871,9 +1071,8 @@
                 [lo hi] (stale-of hunk start end)
                 acc (cond-> acc
                       (< read-from from)
-                      (conj {:state :reviewed :start (+ read-from offset)
-                             :end (+ (dec from) offset)
-                             :moved? (not (zero? offset))}))]
+                      (into (reviewed-of read-from (dec from) offset
+                                         old-lines new-lines)))]
             (recur (rest hs)
                    (inc to)
                    (+ offset (- new-count old-count))
@@ -881,28 +1080,47 @@
                               :reason "content changed"})))
           (cond-> acc
             (<= read-from end)
-            (conj {:state :reviewed :start (+ read-from offset) :end (+ end offset)
-                   :moved? (not (zero? offset))})))))))
+            (into (reviewed-of read-from end offset old-lines new-lines))))))))
 
 (defn try-anchor
   "Locate a record's reviewed content inside file `p`, whose content is `cur`.
    Returns a :reviewed or a :stale result, the latter carrying `:fragments`
-   where the record confirms against the file at its commit and the diff says
-   which of its lines changed."
-  [{:keys [start end commit content-hash file-hash path]} p cur]
+   where a commit confirms the record and the diff since it says which of its
+   lines changed."
+  [{:keys [start end commit content-hash file-hash path] :as record} p cur]
   (if (= (:hash cur) file-hash)
     ;; byte-identical to review time: nothing to project
     {:state :reviewed :path p :start start :end end :moved? (not= p path)}
     (let [new-lines @(:lines cur)
           len (inc (- end start))
-          old-text (delay (read-at-commit commit path))
-          hunks (or (when (= p path) (get @commit-hunks [commit path]))
-                    (when @old-text (diff-hunks @old-text (:text cur))))
+          ;; ADR-0018: the diff is only evidence about this record once the
+          ;; file at the commit it is taken from holds the content the record
+          ;; signed for. A mark made on a dirty working tree is confirmed by a
+          ;; commit after the one it cites; a record no commit confirms keeps
+          ;; the commit it cites and goes stale whole.
+          confirming (anchor-commit record)
+          diff-from (or confirming commit)
+          old-text (read-at-commit diff-from path)
+          old-lines (when old-text (lines-of old-text))
+          hunks (or (when (= p path) (get @commit-hunks [diff-from path]))
+                    (when old-text (diff-hunks old-text (:text cur))))
+          confirmed? (some? confirming)
+          ;; ADR-0019: the stored hash keeps ADR-0003's trim, so it says the
+          ;; lines are there and not how they are laid out. Only the text at
+          ;; the commit says that, so a record no commit confirms keeps the
+          ;; trim alone.
+          old-region (when confirmed? (subvec old-lines (dec start) end))
+          same-read-at? (fn [from to]
+                          (or (not confirmed?)
+                              (when-let [run (lines-run new-lines from to)]
+                                (same-read? old-region run))))
           {:keys [offset]} (if hunks (project-range hunks start end) {:offset 0})
           ns* (+ start offset)
           ne (+ end offset)
           in-bounds? (and (>= ns* 1) (<= ne (count new-lines)))]
-      (if (and in-bounds? (= content-hash (norm-hash (subvec new-lines (dec ns*) ne))))
+      (if (and in-bounds?
+               (= content-hash (norm-hash (subvec new-lines (dec ns*) ne)))
+               (same-read-at? ns* ne))
         {:state :reviewed :path p :start ns* :end ne
          :moved? (or (not (zero? offset)) (not= p path))}
         ;; The region did not land where the diff said. Look for the block
@@ -911,25 +1129,19 @@
         (let [here (occurrences (file-windows new-lines len) content-hash 2)
               unique? (= 1 (count here))
               ;; the old text can only veto a unique match
-              there (when (and unique? @old-text)
-                      (occurrences (window-starts (mapv str/trim (lines-of @old-text)) len)
+              there (when (and unique? old-lines)
+                      (occurrences (window-starts (mapv str/trim old-lines) len)
                                    content-hash 2))]
-          (if (and unique? (or (nil? there) (<= (count there) 1)))
+          (if (and unique? (or (nil? there) (<= (count there) 1))
+                   (same-read-at? (first here) (+ (first here) len -1)))
             {:state :reviewed :path p :start (first here) :end (+ (first here) len -1)
              :moved? true :reason "block moved"}
             (let [total (count new-lines)
                   s (max 1 (min (if in-bounds? ns* start) total))
                   e (max s (min (if in-bounds? ne end) total))
-                  ;; ADR-0018: the diff is only evidence about this record
-                  ;; once the file at the commit it cites holds the content it
-                  ;; signed for. A record no commit confirms goes stale whole.
-                  old-lines (when @old-text (lines-of @old-text))
-                  confirmed? (and (seq hunks)
-                                  old-lines
-                                  (<= end (count old-lines))
-                                  (= content-hash
-                                     (norm-hash (subvec old-lines (dec start) end))))
-                  frags (when confirmed? (fragments-of hunks start end))]
+                  frags (when confirmed?
+                          (fragments-of (strict-hunks hunks old-lines new-lines)
+                                        start end old-lines new-lines))]
               (cond-> {:state :stale :path p
                        :start (when (pos? total) s) :end (when (pos? total) e)
                        :reason "content changed"}

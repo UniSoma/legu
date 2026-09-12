@@ -72,6 +72,24 @@ Locating a review record's content in the working tree and deciding whether it
 changed.
 _Avoid_: projection, resolution, relocation, tracking
 
+**Same read**:
+What two texts are when, after removing the leading whitespace common to every
+line of each, they trim equal at the end of each line. Trailing whitespace
+never matters and leading whitespace matters relative to the region, so a block
+reindented together is the same read as before and a line moved to another
+level is not (ADR-0019).
+_Avoid_: equivalent, whitespace-insensitive, normalised
+
+**Confirming commit**:
+The commit whose text a review record's content hash is checked against before
+its diff is trusted: the commit the record cites when that one holds the lines
+it signed for, else the first of the few commits after it that does. A mark
+made while the working tree was dirty cites a commit whose text it never read,
+and the commit that carried the edit into git is where the read is found. A
+record no commit confirms, and one made where there is no git, are stale over
+their whole region (ADR-0018).
+_Avoid_: base commit, matching commit, source commit
+
 **Fragment**:
 One of the pieces anchoring reports a review record in when a change landed
 inside its region: the lines a hunk wrote, which are stale, or a run of lines
