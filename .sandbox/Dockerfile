@@ -24,13 +24,8 @@ RUN apt-get update; \
 # <<< emacs <<<
 
 # >>> shells >>>
-# test/cli_test.clj drives the completion snippets through all three, and since
-# d910ab8 a missing shell fails the suite rather than skipping it.
-ARG ZSH_VERSION=5.9-8+b23
-ARG FISH_VERSION=4.0.2-1
 RUN apt-get update; \
-    apt-get install -y --no-install-recommends \
-    "zsh=${ZSH_VERSION}" "fish=${FISH_VERSION}"; \
+    apt-get install -y --no-install-recommends zsh fish; \
     rm -rf /var/lib/apt/lists/*; \
     zsh --version; \
     fish --version
@@ -80,7 +75,10 @@ ENV CLJ_SURGEON_CLJ_KONDO_ADMISSION=/usr/local/bin/clj-kondo-admission
 # <<< clojure (managed) <<<
 
 # >>> knot (managed) >>>
-ARG KNOT_VERSION=0.12.0
-RUN bbin install https://github.com/UniSoma/knot.git --tag "v${KNOT_VERSION}"
+# Prebuilt binary (bundles its own babashka runtime); the installer verifies SHA256SUMS.
+ARG KNOT_VERSION=0.15.0
+RUN curl -fsSL https://raw.githubusercontent.com/UniSoma/knot/main/install.sh \
+      | KNOT_VERSION="${KNOT_VERSION}" KNOT_INSTALL_DIR=/usr/local/bin sh; \
+    knot --version
 # <<< knot (managed) <<<
 

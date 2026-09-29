@@ -85,7 +85,7 @@ structural write is done when all four hold:
 
 1. `clj-paren-repair <files>` — formats via cljfmt.
 2. `clj-kondo --lint <files>` — clean.
-3. `clj-nrepl-eval -p 7888 "(require 'my.ns :reload)"` — reloads.
+3. Reload each namespace the write touched, through the project's REPL: `(require 'my.ns :reload)`.
 4. The project's tests pass.
 
 Step 3 is what catches a reference stranded by `:extract!`, `:fix-declares!`, `:mv`, or
